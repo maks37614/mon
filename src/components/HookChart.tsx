@@ -19,6 +19,7 @@ import { HookChartCanvas, Candle } from './HookChartCanvas';
 
 export interface HookChartProps {
   symbol: string;
+  exchange?: 'binance' | 'bybit';
   entryPrice?: number;
   stopLoss?: number;
   takeProfit?: number;
@@ -43,16 +44,18 @@ function getCandleCountdown(tf: string) {
     case '30m': n = 1800000; break;
     case '1h': n = 3600000; break;
     case '4h': n = 14400000; break;
+    case '1d': n = 86400000; break;
     default: n = 60000;
   }
   const r = Math.ceil(t / n) * n;
   const diff = Math.max(0, r - t);
   const totalSec = Math.floor(diff / 1000);
   const m = Math.floor((totalSec % 3600) / 60);
+  const h = Math.floor(totalSec / 3600);
   const s = totalSec % 60;
   const isUrgent = totalSec <= (tf === '1m' ? 15 : tf === '5m' ? 30 : 45);
   return {
-    formatted: `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`,
+    formatted: `${h > 0 ? `${h}:` : ''}${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`,
     totalSec,
     isUrgent,
   };
@@ -60,6 +63,7 @@ function getCandleCountdown(tf: string) {
 
 export const HookChart: React.FC<HookChartProps> = ({
   symbol,
+  exchange = 'binance',
   entryPrice,
   stopLoss,
   takeProfit,
@@ -128,7 +132,7 @@ export const HookChart: React.FC<HookChartProps> = ({
       abortControllerRef.current = controller;
 
       const res = await fetch(
-        `/api/binance/klines?symbol=${encodeURIComponent(symbol)}&interval=${timeframe}&limit=160`,
+        `/api/market/klines?symbol=${encodeURIComponent(symbol)}&interval=${timeframe}&limit=300`,
         { signal: controller.signal }
       );
 
@@ -173,7 +177,7 @@ export const HookChart: React.FC<HookChartProps> = ({
         setIsLoading(false);
       }
     }
-  }, [symbol, timeframe]);
+  }, [symbol, timeframe, exchange]);
 
   // Initial fetch on symbol / timeframe change
   useEffect(() => {
@@ -193,17 +197,8 @@ export const HookChart: React.FC<HookChartProps> = ({
   }, [provider, fetchKlines]);
 
   // TradingView widget URL
-  const tvInterval =
-    timeframe === '1m'
-      ? '1'
-      : timeframe === '5m'
-      ? '5'
-      : timeframe === '15m'
-      ? '15'
-      : timeframe === '1h'
-      ? '60'
-      : '240';
-  const tvSymbol = `BINANCE:${symbol.toUpperCase()}.P`;
+  const tvInterval = ({ '1m': '1', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '4h': '240', '1d': 'D' } as const)[timeframe];
+  const tvSymbol = `${exchange === 'bybit' ? 'BYBIT' : 'BINANCE'}:${symbol.toUpperCase()}.P`;
   const tvWidgetUrl = `https://s.tradingview.com/widgetembed/?${new URLSearchParams({
     symbol: tvSymbol,
     interval: tvInterval,
@@ -394,7 +389,7 @@ export const HookChart: React.FC<HookChartProps> = ({
 
           {/* Timeframe Switcher */}
           <div className="flex items-center gap-0.5 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px] font-mono">
-            {(['1m', '5m', '15m', '1h', '4h'] as Timeframe[]).map((tf) => (
+            {(['1m', '5m', '15m', '30m', '1h', '4h', '1d'] as Timeframe[]).map((tf) => (
               <button
                 key={tf}
                 onClick={() => setTimeframe(tf)}
