@@ -1,0 +1,6 @@
+{
+  "name": "h00k.top",
+  "description": "Автоскальпінг бот на основі технічних формацій та патернів h00k.top.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

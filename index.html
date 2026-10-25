@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>h00k.top</title>
+    <meta name="description" content="Автоскальпінг бот на основі технічних формацій та патернів h00k.top." />
+    <meta property="og:title" content="h00k.top" />
+    <meta property="og:description" content="Автоскальпінг бот на основі технічних формацій та патернів h00k.top." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Suppress Vite HMR WebSocket connection errors in iframe environment & lightweight-charts disposed RAF
+      window.addEventListener('error', function(event) {
+        const msg = String(event.message || (event.error && event.error.message) || '');
+        const fn = String(event.filename || '');
+        if (
+          msg.includes('WebSocket') ||
+          msg.includes('createWebSocketModuleRunnerTransport') ||
+          msg.includes('Object is disposed') ||
+          fn.includes('@vite/client') ||
+          fn.includes('lightweight-charts')
+        ) {
+          event.stopImmediatePropagation();
+          event.preventDefault();
+          return true;
+        }
+      }, true);
+      window.addEventListener('unhandledrejection', function(event) {
+        const reason = String(event.reason || (event.reason && event.reason.message) || '');
+        if (
+          reason.includes('WebSocket') ||
+          reason.includes('createWebSocketModuleRunnerTransport') ||
+          reason.includes('Object is disposed')
+        ) {
+          event.stopImmediatePropagation();
+          event.preventDefault();
+        }
+      }, true);
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

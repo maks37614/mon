@@ -1,0 +1,66 @@
+{
+  "name": "crypto-watch-terminal",
+  "private": true,
+  "version": "7.99.0",
+  "description": "Crypto Watch Terminal",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "scripts": {
+    "dev": "vite --port=3000 --host=127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host=127.0.0.1",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "lucide-react": "0.546.0",
+    "react": "19.0.1",
+    "react-dom": "19.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.14.0",
+    "@types/react": "19.0.10",
+    "@types/react-dom": "19.0.4",
+    "@vitejs/plugin-react": "4.3.2",
+    "typescript": "5.7.3",
+    "vite": "4.5.9"
+  },
+  "build": {
+    "appId": "com.cryptowatch.terminal",
+    "productName": "Crypto Watch Terminal",
+    "electronVersion": "41.10.7",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

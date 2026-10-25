@@ -1,0 +1,8 @@
+{
+  "name": "Crypto Watch Terminal",
+  "description": "Real-time cryptocurrency charting terminal and watchlist with order book density, liquidation cascades, drawing tools, and market indicators.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
