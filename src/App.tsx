@@ -76,11 +76,15 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
     <main className="login-page">
       <div className="login-card">
         <div className="brand">
-          <span className="brand-icon">
-            <Activity size={23} />
-          </span>
           <span>
-            EVGEN<span className="brand-sub">TRADING TERMINAL</span>
+            <img
+              className="brand-logo"
+              src="/h00k-logo.svg"
+              alt="h00k.top"
+              width={194}
+              height={48}
+            />
+            <span className="brand-sub">EVGEN · TRADING TERMINAL</span>
           </span>
         </div>
         <div className="eyebrow">ПРИВАТНИЙ ДОСТУП</div>
@@ -777,11 +781,15 @@ export default function App() {
     <div className="terminal">
       <header className="topbar">
         <a className="brand" href="/">
-          <span className="brand-icon">
-            <Activity size={22} />
-          </span>
           <span>
-            EVGEN<span className="brand-sub">TRADING TERMINAL</span>
+            <img
+              className="brand-logo"
+              src="/h00k-logo.svg"
+              alt="h00k.top"
+              width={194}
+              height={48}
+            />
+            <span className="brand-sub">EVGEN · TRADING TERMINAL</span>
           </span>
         </a>
         <div className="topbar-right">
@@ -1193,9 +1201,7 @@ export default function App() {
                                 }
                               >
                                 {money(t.netPnl)}
-                                {t.estimated ? (
-                                  <small>Симуляція</small>
-                                ) : t.feesComplete === false ? (
+                                {!t.estimated && t.feesComplete === false ? (
                                   <small>Комісії неповні</small>
                                 ) : null}
                               </td>
