@@ -219,8 +219,7 @@ const priceTickDecimals = (step: number) => {
 };
 
 const levelPrice = (n: number) => {
-  const d = n >= 100 ? 2 : n >= 1 ? 4 : 6;
-  return Number(n.toFixed(d)).toString();
+  return n.toLocaleString('en-US', { maximumSignificantDigits: 9, useGrouping: false });
 };
 
 const uid = () => Math.random().toString(36).slice(2);
@@ -427,6 +426,8 @@ export interface HookChartCanvasProps {
   entryPrice?: number;
   takeProfit?: number;
   stopLoss?: number;
+  entryTimestamp?: number;
+  focusAt?: number;
   direction?: 'LONG' | 'SHORT';
   formationName?: string;
   tool?: string;
@@ -451,6 +452,8 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
   entryPrice,
   takeProfit,
   stopLoss,
+  entryTimestamp,
+  focusAt,
   direction = 'LONG',
   formationName,
   tool = 'cursor',
@@ -476,7 +479,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     autoY: true,
     manualCenter: null,
     manualRange: null,
-    fitAll: false,
+    fitAll: Boolean(focusAt),
   });
 
   const [drawings, setDrawings] = useState<Drawing[]>([]);
@@ -745,7 +748,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
       autoY: true,
       manualCenter: null,
       manualRange: null,
-      fitAll: false,
+      fitAll: Boolean(focusAt),
     });
 
   const fitAllHistory = () =>
@@ -1043,13 +1046,13 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
       q.fillText(title, 8, Math.max(12, yy - 4));
 
       // Price Tag on Right Price Scale
-      const text = `${fmt(price, price < 10 ? 4 : 2)}`;
+      const text = levelPrice(price);
       q.font = 'bold 11px system-ui';
       const tw = Math.min(AX - 8, q.measureText(text).width + 10);
       q.fillStyle = bg;
       q.fillRect(g.plotW + 2, Math.max(0, Math.min(g.plotH - 18, yy - 9)), tw, 18);
       q.fillStyle = '#ffffff';
-      q.fillText(text, g.plotW + 6, Math.max(12, Math.min(g.plotH - 5, yy + 4)));
+      q.fillText(text, g.plotW + 6, Math.max(12, Math.min(g.plotH - 5, yy + 4)), AX - 12);
       q.restore();
     };
 
@@ -1061,6 +1064,30 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     }
     if (stopLoss && stopLoss > 0) {
       renderTradeLine(stopLoss, 'SL (СТОП)', '#ef4444', '#dc2626');
+    }
+    if (entryPrice > 0 && entryTimestamp > 0) {
+      const bar = Math.floor(entryTimestamp / intervalMs) * intervalMs;
+      const xx = g.x(bar), yy = g.y(entryPrice);
+      if (xx >= 0 && xx <= g.plotW && yy >= 0 && yy <= g.plotH) {
+        q.save();
+        q.strokeStyle = '#22d3ee';
+        q.globalAlpha = 0.55;
+        q.setLineDash([2, 4]);
+        q.beginPath();
+        q.moveTo(xx, 0);
+        q.lineTo(xx, g.plotH);
+        q.stroke();
+        q.setLineDash([]);
+        q.globalAlpha = 1;
+        q.beginPath();
+        q.arc(xx, yy, 5, 0, Math.PI * 2);
+        q.fillStyle = '#06b6d4';
+        q.fill();
+        q.strokeStyle = '#e0faff';
+        q.lineWidth = 2;
+        q.stroke();
+        q.restore();
+      }
     }
 
     // Live Current Price Line & Badge
@@ -1180,6 +1207,8 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     entryPrice,
     takeProfit,
     stopLoss,
+    entryTimestamp,
+    tf,
     symbol,
     draft,
     selectedDrawingId,

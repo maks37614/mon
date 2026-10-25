@@ -24,6 +24,7 @@ export type Position = {
   symbol: string;
   direction: "LONG" | "SHORT";
   formation: string;
+  timeframe?: string;
   quantity: number;
   originalQuantity: number;
   entryPrice: number;
@@ -151,7 +152,10 @@ export class Trading {
       wins = history.filter((t) => t.netPnl > 0).length;
     return {
       settings: s,
-      positions: b.positions.map(({ intent, ...p }) => p),
+      positions: b.positions.map(({ intent, ...p }) => ({
+        ...p,
+        timeframe: p.timeframe || intent?.signal?.timeframe,
+      })),
       pending: b.pending.map((p) => ({
         id: p.id,
         symbol: p.symbol,
@@ -477,6 +481,7 @@ export class Trading {
       symbol: intent.symbol,
       direction: intent.direction,
       formation: intent.signal.formation,
+      timeframe: intent.signal.timeframe,
       quantity: fill.filled,
       originalQuantity: fill.filled,
       entryPrice: fill.average,
@@ -553,8 +558,11 @@ export class Trading {
       symbol: p.symbol,
       direction: p.direction,
       formation: p.formation,
+      timeframe: p.timeframe || p.intent?.signal?.timeframe,
       entryPrice: p.entryPrice,
       exitPrice: price,
+      stopLoss: p.stopLoss,
+      takeProfit: p.takeProfit,
       quantity: p.originalQuantity,
       grossPnl: gross,
       fee: p.entryFee + exitFee,
@@ -661,8 +669,11 @@ export class Trading {
       symbol: p.symbol,
       direction: p.direction,
       formation: p.formation,
+      timeframe: p.timeframe || p.intent?.signal?.timeframe,
       entryPrice: p.entryPrice,
       exitPrice: exit,
+      stopLoss: p.stopLoss,
+      takeProfit: p.takeProfit,
       quantity: total,
       grossPnl: gross,
       fee,

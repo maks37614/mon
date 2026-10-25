@@ -18,7 +18,7 @@ import {
   type Settings,
   type Signal,
 } from "../backend/config";
-import { HookChart } from "./components/HookChart";
+import { HookChart, type HookChartProps } from "./components/HookChart";
 import { api, setCsrf } from "./api";
 import "./dashboard.css";
 
@@ -36,6 +36,7 @@ type Snapshot = {
   schedulerMode: string;
   apiPauses: Record<string, number>;
 };
+type ChartSelection = HookChartProps & { id: string; historical: boolean };
 const money = (n: number) =>
   Number(n || 0).toLocaleString("uk-UA", {
     minimumFractionDigits: 2,
@@ -663,7 +664,7 @@ export default function App() {
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [query, setQuery] = useState(""),
-    [chart, setChart] = useState<any>(null);
+    [chart, setChart] = useState<ChartSelection | null>(null);
   const refresh = useCallback(async () => {
     try {
       const next = await api<Snapshot>("/api/state");
@@ -698,6 +699,19 @@ export default function App() {
     }, 5000);
     return () => clearInterval(timer);
   }, [authenticated, refresh]);
+  useEffect(() => {
+    if (!chart) return;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setChart(null);
+    };
+    window.addEventListener("keydown", close);
+    return () => {
+      document.body.style.overflow = overflow;
+      window.removeEventListener("keydown", close);
+    };
+  }, [chart]);
   async function run(fn: () => Promise<any>, success = "") {
     if (busy) return false;
     setBusy(true);
@@ -722,6 +736,23 @@ export default function App() {
   const s = data.settings,
     scan = data.scanner,
     live = s.mode === "live";
+  function openChart(item: any, historical = false) {
+    const timeframe = item.timeframe || s.timeframes[0];
+    setChart({
+      id: item.id,
+      historical,
+      exchange: item.exchange || s.exchange,
+      symbol: item.symbol,
+      direction: item.direction,
+      entryPrice: item.entryPrice,
+      takeProfit: item.takeProfit,
+      stopLoss: item.stopLoss,
+      entryTimestamp: item.openedAt || item.candleAt,
+      focusAt: historical ? item.openedAt : undefined,
+      formationName: item.formation || item.formationName,
+      initialTimeframe: TIMEFRAMES.includes(timeframe) ? timeframe : "1m",
+    });
+  }
   const signals = data.signals.filter((signal) =>
     `${signal.symbol} ${signal.formation}`
       .toLowerCase()
@@ -1090,10 +1121,13 @@ export default function App() {
                             <tr key={p.id}>
                               <td>
                                 <button
-                                  className="link-button"
-                                  onClick={() => setChart(p)}
+                                  className="link-button chart-symbol"
+                                  title={`Відкрити HookChart ${p.symbol}: вхід, ціль, стоп`}
+                                  aria-haspopup="dialog"
+                                  onClick={() => openChart(p)}
                                 >
                                   {p.symbol}
+                                  <BarChart3 size={13} aria-hidden="true" />
                                 </button>
                                 <small>
                                   {p.status === "active"
@@ -1189,7 +1223,17 @@ export default function App() {
                         <tbody>
                           {data.history.slice(0, 100).map((t) => (
                             <tr key={t.id}>
-                              <td>{t.symbol}</td>
+                              <td>
+                                <button
+                                  className="link-button chart-symbol"
+                                  title={`Відкрити HookChart угоди ${t.symbol}: вхід, ціль, стоп`}
+                                  aria-haspopup="dialog"
+                                  onClick={() => openChart(t, true)}
+                                >
+                                  {t.symbol}
+                                  <BarChart3 size={13} aria-hidden="true" />
+                                </button>
+                              </td>
                               <td>{t.direction}</td>
                               <td>{price(t.entryPrice)}</td>
                               <td>{price(t.exitPrice)}</td>
@@ -1259,10 +1303,13 @@ export default function App() {
                           <tr key={signal.id}>
                             <td>
                               <button
-                                className="link-button"
-                                onClick={() => setChart(signal)}
+                                className="link-button chart-symbol"
+                                title={`Відкрити HookChart ${signal.symbol}: вхід, ціль, стоп`}
+                                aria-haspopup="dialog"
+                                onClick={() => openChart(signal)}
                               >
                                 {signal.symbol}
+                                <BarChart3 size={13} aria-hidden="true" />
                               </button>
                               <small>{signal.timeframe}</small>
                             </td>
@@ -1335,30 +1382,53 @@ export default function App() {
           role="dialog"
           aria-modal="true"
           aria-label={`Графік ${chart.symbol}`}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setChart(null);
+          }}
         >
           <div className="chart-modal">
             <div className="section-heading">
               <strong>
-                {chart.symbol} · {s.exchange.toUpperCase()}
+                HookChart · {chart.symbol} · {chart.exchange.toUpperCase()}
               </strong>
               <button
                 className="icon-button"
                 aria-label="Закрити графік"
+                autoFocus
                 onClick={() => setChart(null)}
               >
                 <X size={20} />
               </button>
             </div>
+            <div className="trade-levels" aria-label="Рівні угоди">
+              <span className="entry-level">
+                Вхід <strong>{price(chart.entryPrice)}</strong>
+              </span>
+              <span className="target-level">
+                Ціль (TP) <strong>{chart.takeProfit ? price(chart.takeProfit) : "—"}</strong>
+              </span>
+              <span className="stop-level">
+                Стоп (SL) <strong>{chart.stopLoss ? price(chart.stopLoss) : "—"}</strong>
+              </span>
+            </div>
+            {chart.historical && (!chart.takeProfit || !chart.stopLoss) && (
+              <p className="muted chart-history-note">
+                У старому записі угоди ціль і стоп не збережені. Для нових угод
+                ці рівні зберігаються автоматично.
+              </p>
+            )}
             <HookChart
-              key={`${s.exchange}:${chart.symbol}`}
-              exchange={s.exchange}
+              key={`${chart.exchange}:${chart.id}`}
+              exchange={chart.exchange}
               symbol={chart.symbol}
               entryPrice={chart.entryPrice}
               stopLoss={chart.stopLoss}
               takeProfit={chart.takeProfit}
               direction={chart.direction}
-              formationName={chart.formation || chart.formationName}
-              initialTimeframe={chart.timeframe || s.timeframes[0]}
+              entryTimestamp={chart.entryTimestamp}
+              focusAt={chart.focusAt}
+              formationName={chart.formationName}
+              initialTimeframe={chart.initialTimeframe}
               height={520}
             />
           </div>

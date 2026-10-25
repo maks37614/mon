@@ -250,12 +250,16 @@ export function createApplication(options: Options) {
     "/api/market/klines",
     route(async (req, res) => {
       const s = trading.settings();
+      const exchange = req.query.exchange ?? s.exchange;
+      if (exchange !== "binance" && exchange !== "bybit")
+        throw new Error("Невідома біржа графіка");
       const data = await market.getCandles(
-        s.exchange,
+        exchange,
         String(req.query.symbol || "BTCUSDT"),
         String(req.query.interval || "1m"),
         Number(req.query.limit || 160),
         false,
+        req.query.endTime === undefined ? undefined : Number(req.query.endTime),
       );
       res.json(data);
     }),

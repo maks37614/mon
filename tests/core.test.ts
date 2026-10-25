@@ -220,6 +220,31 @@ test("paper TP uses observed execution price and both fees, without a real order
   );
   assert.equal(f.broker.submitted.length, 0);
 });
+test("trade charts preserve the entry timeframe and actual protection levels after settings change", async (t) => {
+  const f = fixture(t);
+  await f.trading.updateSettings({ timeframes: ["15m"] });
+  f.store.set("signals", [signal({ timeframe: "15m" })]);
+  await f.trading.enter("signal-1");
+  const position = f.trading.snapshot().positions[0];
+  assert.equal(position.timeframe, "15m");
+  // Active positions from an earlier release retain the timeframe in their intent.
+  const book = f.store.get<any>("book:paper", null);
+  delete book.positions[0].timeframe;
+  f.store.set("book:paper", book);
+  assert.equal(f.trading.snapshot().positions[0].timeframe, "15m");
+  await f.trading.updateSettings({
+    timeframes: ["4h"], takeProfitPercent: 2, stopLossPercent: 1,
+  });
+  await f.trading.closePosition(position.id);
+  const history = f.trading.snapshot().history[0];
+  assert.equal(history.timeframe, "15m");
+  assert.equal(history.exchange, position.exchange);
+  assert.equal(history.entryPrice, position.entryPrice);
+  assert.equal(history.takeProfit, position.takeProfit);
+  assert.equal(history.stopLoss, position.stopLoss);
+  const restarted = new Trading(f.store, f.market, f.vault, f.broker, false);
+  assert.deepEqual(restarted.snapshot().history[0], history);
+});
 test("a signal cannot open twice concurrently and open exposure prevents a mode switch", async (t) => {
   const f = fixture(t);
   const results = await Promise.allSettled([
@@ -270,7 +295,8 @@ test("failed protective orders pause entries and request a separate reduce-only 
 test("live closing is not recorded until venue position and complete fills agree", async (t) => {
   const f = fixture(t, "live");
   await f.trading.enter("signal-1");
-  const id = f.trading.snapshot().positions[0].id;
+  const position = f.trading.snapshot().positions[0];
+  const id = position.id;
   f.broker.closingTrades = async () => [];
   await f.trading.closePosition(id);
   await f.trading.monitor();
@@ -297,6 +323,10 @@ test("live closing is not recorded until venue position and complete fills agree
   await f.trading.monitor();
   assert.equal(f.trading.snapshot().positions.length, 0);
   assert.ok(Math.abs(f.trading.snapshot().history[0].exitPrice - 101.6) < 1e-9);
+  const history = f.trading.snapshot().history[0];
+  assert.equal(history.timeframe, position.timeframe);
+  assert.equal(history.takeProfit, position.takeProfit);
+  assert.equal(history.stopLoss, position.stopLoss);
 });
 test("server-level live disable cannot be bypassed by changing settings", async (t) => {
   const f = fixture(t),
@@ -530,6 +560,37 @@ test("simultaneous chart reads share one request and 429 pauses further upstream
   await assert.rejects(blocked.getMarkets("bybit"));
   assert.equal(count, 1);
 });
+test("historical chart windows use exchange-specific timestamps and separate live and historical caches", async () => {
+  const requests: URL[] = [];
+  const endTime = 1_700_000_000_000;
+  const m = new MarketData(
+    () => ({ ...DEFAULT_SETTINGS, requestsPerSecond: 8 }),
+    (async (input: any) => {
+      const url = new URL(String(input));
+      requests.push(url);
+      const rows = [[endTime - 60_000, "100", "102", "99", "101", "10"]];
+      return Response.json(url.hostname === "api.bybit.com"
+        ? { retCode: 0, result: { list: rows } } : rows);
+    }) as typeof fetch,
+  );
+  m.getMarkets = async () => [{ symbol: "BTCUSDT" } as any];
+  await Promise.all([
+    m.getCandles("binance", "BTCUSDT", "1m", 300, false, endTime),
+    m.getCandles("binance", "BTCUSDT", "1m", 300, false, endTime),
+  ]);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].searchParams.get("endTime"), String(endTime));
+  await m.getCandles("binance", "BTCUSDT", "1m", 300, false);
+  assert.equal(requests[1].searchParams.has("endTime"), false);
+  const bybit = await m.getCandles("bybit", "BTCUSDT", "15m", 300, false, endTime);
+  assert.equal(requests[2].searchParams.get("end"), String(endTime));
+  assert.equal(requests[2].searchParams.get("interval"), "15");
+  assert.equal(bybit[0].time, endTime - 60_000);
+  for (const invalid of [NaN, -1, 1.5, Date.now() + 86400_000]) {
+    await assert.rejects(m.getCandles("binance", "BTCUSDT", "1m", 300, false, invalid), /час/);
+  }
+  assert.equal(requests.length, 3);
+});
 test("exchange adapter sends reduceOnly on exits and never places a spot order", async (t) => {
   const { store } = storage(t),
     vault = new Vault(store, randomBytes(32).toString("base64"));
@@ -646,6 +707,17 @@ test("HTTP authentication, CSRF, secret redaction and cron authorization protect
     "X-CSRF-Token": csrf,
     "Content-Type": "application/json",
   };
+  const chartRequests: any[][] = [];
+  runtime.market.getCandles = async (...args) => {
+    chartRequests.push(args);
+    return [];
+  };
+  const chart = await fetch(base + "/api/market/klines?exchange=bybit&symbol=BTCUSDT&interval=15m&limit=300&endTime=1700000000000", { headers: { Cookie: cookie } });
+  assert.equal(chart.status, 200);
+  assert.deepEqual(chartRequests[0], ["bybit", "BTCUSDT", "15m", 300, false, 1700000000000]);
+  assert.equal(runtime.trading.settings().exchange, "binance");
+  assert.equal((await fetch(base + "/api/market/klines?exchange=unknown", { headers: { Cookie: cookie } })).status, 400);
+  assert.equal(chartRequests.length, 1);
   assert.equal(
     (
       await fetch(base + "/api/credentials/binance", {

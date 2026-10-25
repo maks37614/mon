@@ -678,6 +678,42 @@ legend {
 .chart-modal .section-heading {
   margin-bottom: 10px;
 }
+.chart-symbol {
+  white-space: nowrap;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 4px;
+}
+.chart-symbol:hover {
+  text-decoration-style: solid;
+}
+.trade-levels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.trade-levels > span {
+  display: inline-flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid currentColor;
+  border-radius: 7px;
+}
+.entry-level {
+  color: #22d3ee;
+}
+.target-level {
+  color: #34d399;
+}
+.stop-level {
+  color: #fb7185;
+}
+.chart-history-note {
+  margin-bottom: 12px;
+}
 .spinning {
   animation: spin 2s linear infinite;
 }

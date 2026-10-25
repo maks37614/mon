@@ -209,6 +209,7 @@ export class MarketData {
     timeframe: string,
     limit: number,
     closedOnly: boolean,
+    endTime?: number,
   ): Promise<Candle[]> {
     if (
       !/^[A-Z0-9]{3,40}$/.test(symbol) ||
@@ -218,10 +219,15 @@ export class MarketData {
       limit > 1000
     )
       throw new Error("Некоректні параметри свічок");
+    if (
+      endTime !== undefined &&
+      (!Number.isSafeInteger(endTime) || endTime <= 0 || endTime > Date.now())
+    )
+      throw new Error("Некоректний час історичних свічок");
     const markets = await this.getMarkets(exchange);
     if (!markets.some((m) => m.symbol === symbol))
       throw new Error("Контракт відсутній на вибраній біржі");
-    const key = `${exchange}:${symbol}:${timeframe}:${limit}:${closedOnly}`;
+    const key = `${exchange}:${symbol}:${timeframe}:${limit}:${closedOnly}:${endTime ?? "latest"}`;
     const cached = this.cache.get(key);
     if (cached && cached.expires > Date.now()) return cached.data;
     return this.once(key, async () => {
@@ -240,12 +246,14 @@ export class MarketData {
               symbol,
               interval: timeframe,
               limit,
+              ...(endTime === undefined ? {} : { endTime }),
             })
           : await this.request(exchange, "/v5/market/kline", {
               category: "linear",
               symbol,
               interval: bybitTf[timeframe],
               limit,
+              ...(endTime === undefined ? {} : { end: endTime }),
             });
       const rows = exchange === "binance" ? raw : raw.result?.list;
       if (!Array.isArray(rows)) throw new Error("Некоректна відповідь свічок");
