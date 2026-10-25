@@ -1,0 +1,13 @@
+.git
+node_modules
+dist
+build
+data
+.env
+.env.*
+*.sqlite*
+*.log
+.test-*
+coverage
+extracted_chart
+public/assets/aistudio

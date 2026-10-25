@@ -44,6 +44,26 @@ npm start
 
 ## Перенесення на OVHcloud VPS
 
+### Варіант із наявним Docker і Caddy
+
+На перевіреному VPS `hook.vps.ovh.net` уже є Docker і Caddy, тому можна встановити застосунок без зміни системного Node.js:
+
+```bash
+sudo bash deploy/install-docker.sh
+```
+
+Інсталятор збирає офіційний Node 24 LTS образ, виконує перевірку типів, тести та production-збірку, пропонує створити пароль і запускає окремий контейнер `evgen-mon` на `127.0.0.1:3010` з лімітами 768 МБ RAM і 0,5 CPU. Дані розміщено в `/var/lib/evgen-mon`, конфігурацію — у `/etc/evgen-mon.env`. До чинного Caddyfile додається лише virtual host `evgen.h00k.top`, зі збереженням резервної копії та перевіркою перед reload. Чинні контейнер і virtual host h00k.top не змінюються. DNS інсталятор не редагує.
+
+Для цього VPS запис `A` піддомену `evgen` має вказувати на `57.129.171.244`. Старе перенаправлення OVH використовує `213.186.33.5`; змініть лише запис `evgen`, не записи головного домену. Якщо DNS оновлено вже після встановлення, перевірте його розповсюдження та виконайте `sudo systemctl reload caddy`.
+
+```bash
+sudo docker ps --filter name=evgen-mon
+sudo docker logs --tail 50 evgen-mon
+curl --fail http://127.0.0.1:3010/healthz
+```
+
+### Варіант із systemd та Node.js на хості
+
 Інсталяцію розраховано на Linux із systemd, зокрема Ubuntu / Debian. Потрібен саме VPS / dedicated server із Node.js, а не тариф спільного PHP-хостингу OVH. Перед перенесенням перевірте поточні CPU/RAM, reverse proxy та резервну копію чинного h00k.top.
 
 1. На VPS встановіть Node.js 24 LTS із офіційного джерела та Git. Отримайте перевірену гілку репозиторію.
