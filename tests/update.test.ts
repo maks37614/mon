@@ -113,6 +113,27 @@ updateTest("VPS update refuses divergent local commits instead of resetting them
   assert.equal(f.read("owner-work.txt"), "committed local work\n");
 });
 
+updateTest("VPS update accepts installed side-branch history once the target includes both parents", t => {
+  const f = fixture(t);
+  // Match the VPS: the original branch was fast-forwarded to a separate fix branch.
+  f.write("entry-controls.txt", "retain installed entry/reverse fix\n");
+  f.git("add", "."); f.git("commit", "-m", "installed entry/reverse fix");
+  const installed = f.git("rev-parse", "HEAD");
+  f.git("switch", "--detach", f.target);
+  f.git("merge", "--no-ff", "--no-edit", installed);
+  const combined = f.git("rev-parse", "HEAD");
+  f.git("push", "origin", `HEAD:refs/heads/${branch}`);
+  f.git("switch", branch);
+  assert.equal(f.git("rev-parse", "HEAD"), installed);
+  f.write("src/App.tsx", initial.replace("footer = 'EVGEN'", "footer = 'h00k'"));
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(f.git("rev-parse", "HEAD"), combined);
+  assert.equal(f.read("src/App.tsx"), incoming.replace("footer = 'EVGEN'", "footer = 'h00k'"));
+  assert.equal(f.read("entry-controls.txt"), "retain installed entry/reverse fix\n");
+  assert.equal(existsSync(path.join(f.repo, "installer-was-executed")), false);
+});
+
 updateTest("VPS update refuses unrelated file conflicts without changing them", t => {
   const f = fixture(t);
   f.git("reset", "--hard", f.target);
