@@ -75,7 +75,44 @@ function detectPatterns(out:StrategyEvent[],preset:StrategyPreset,series:Record<
  if(L.length>=2){const x=L.slice(-2),sim=Math.abs(x[0].p-x[1].p)/avg(x.map(z=>z.p))*100,hi=H.filter(z=>z.i>x[0].i&&z.i<x[1].i).sort((a,b)=>b.p-a.p)[0];if(hi){const sc=clamp(100-sim*18+Math.min(15,(x[1].i-x[0].i)*.8)),conf=last.c>hi.p;emit('Double Bottom','bullish',sc,hi.p,a.length-1-x[1].i,conf,undefined,[`bottoms diff ${sim.toFixed(2)}%`])}}
  if(H.length>=3){const x=H.slice(-3),should=Math.abs(x[0].p-x[2].p)/avg([x[0].p,x[2].p])*100,head=(x[1].p/Math.max(x[0].p,x[2].p)-1)*100;if(head>.2&&should<2){const lows=L.filter(z=>z.i>x[0].i&&z.i<x[2].i);if(lows.length>=2){const neck=avg(lows.slice(-2).map(z=>z.p)),sc=clamp(82+head*6-should*8),conf=last.c<neck;emit('H&S','bearish',sc,neck,a.length-1-x[2].i,conf,undefined,[`head +${head.toFixed(2)}%`,`shoulders diff ${should.toFixed(2)}%`])}}}
  if(L.length>=3){const x=L.slice(-3),should=Math.abs(x[0].p-x[2].p)/avg([x[0].p,x[2].p])*100,head=(Math.min(x[0].p,x[2].p)/x[1].p-1)*100;if(head>.2&&should<2){const highs=H.filter(z=>z.i>x[0].i&&z.i<x[2].i);if(highs.length>=2){const neck=avg(highs.slice(-2).map(z=>z.p)),sc=clamp(82+head*6-should*8),conf=last.c>neck;emit('Inverse H&S','bullish',sc,neck,a.length-1-x[2].i,conf,undefined,[`head ${head.toFixed(2)}% lower`,`shoulders diff ${should.toFixed(2)}%`])}}}
- if(H.length>=3&&L.length>=3){const hs=H.slice(-4),ls=L.slice(-4),rh=regression(hs),rl=regression(ls),start=Math.min(hs[0].i,ls[0].i),end=a.length-1,up0=rh.m*start+rh.b,up1=rh.m*end+rh.b,dn0=rl.m*start+rl.b,dn1=rl.m*end+rl.b,width0=up0-dn0,width1=up1-dn1,conv=width0>0?1-width1/width0:0;let sub='',dir:StrategyDirection='neutral';if(conv>.12){if(Math.abs(rh.m)<Math.abs(rl.m)*.35&&rl.m>0){sub='Ascending Triangle';dir='bullish'}else if(Math.abs(rl.m)<Math.abs(rh.m)*.35&&rh.m<0){sub='Descending Triangle';dir='bearish'}else if(rh.m<0&&rl.m>0){sub='Symmetric Triangle';dir='neutral'}else if(rh.m>0&&rl.m>0&&rl.m>rh.m){sub='Rising Wedge';dir='bearish'}else if(rh.m<0&&rl.m<0&&Math.abs(rh.m)>Math.abs(rl.m)){sub='Falling Wedge';dir='bullish'}}if(sub){const upper=rh.m*end+rh.b,lower=rl.m*end+rl.b,confirmed=dir==='bullish'?last.c>upper:dir==='bearish'?last.c<lower:(last.c>upper||last.c<lower),trigger=dir==='bearish'?lower:upper,sc=clamp(68+conv*45+Math.min(12,(hs.length+ls.length-6)*4)),lines=[{t0:a[start].t,p0:up0,t1:last.t,p1:up1,label:'upper'},{t0:a[start].t,p0:dn0,t1:last.t,p1:dn1,label:'lower'}];emit(sub,dir,sc,trigger,0,confirmed,lines,[`convergence ${Math.round(conv*100)}%`])}}
+ if (H.length >= 3 && L.length >= 3) {
+  const hs = H.slice(-4), ls = L.slice(-4), rh = regression(hs), rl = regression(ls);
+  const start = Math.min(hs[0].i, ls[0].i), end = a.length - 1;
+  const up0 = rh.m * start + rh.b, up1 = rh.m * end + rh.b;
+  const dn0 = rl.m * start + rl.b, dn1 = rl.m * end + rl.b;
+  const width0 = up0 - dn0, width1 = up1 - dn1;
+  const conv = width0 > 0 ? 1 - width1 / width0 : 0;
+  let sub = '', dir: StrategyDirection = 'neutral';
+  if (conv > .12) {
+   if (Math.abs(rh.m) < Math.abs(rl.m) * .35 && rl.m > 0) {
+    sub = 'Ascending Triangle'; dir = 'bullish';
+   } else if (Math.abs(rl.m) < Math.abs(rh.m) * .35 && rh.m < 0) {
+    sub = 'Descending Triangle'; dir = 'bearish';
+   } else if (rh.m < 0 && rl.m > 0) {
+    sub = 'Symmetric Triangle';
+   } else if (rh.m > 0 && rl.m > 0 && rl.m > rh.m) {
+    sub = 'Rising Wedge'; dir = 'bearish';
+   } else if (rh.m < 0 && rl.m < 0 && Math.abs(rh.m) > Math.abs(rl.m)) {
+    sub = 'Falling Wedge'; dir = 'bullish';
+   }
+  }
+  if (sub) {
+   const upper = rh.m * end + rh.b, lower = rl.m * end + rl.b;
+   // Resolve the closing breakout before choosing the symmetric triangle's entry boundary.
+   if (dir === 'neutral') {
+    if (last.c > upper) dir = 'bullish';
+    else if (last.c < lower) dir = 'bearish';
+   }
+   const confirmed = dir === 'bullish' ? last.c > upper : dir === 'bearish' ? last.c < lower : false;
+   const trigger = dir === 'bearish' ? lower : upper;
+   const sc = clamp(68 + conv * 45 + Math.min(12, (hs.length + ls.length - 6) * 4));
+   const lines = [
+    { t0: a[start].t, p0: up0, t1: last.t, p1: up1, label: 'upper' },
+    { t0: a[start].t, p0: dn0, t1: last.t, p1: dn1, label: 'lower' },
+   ];
+   emit(sub, dir, sc, trigger, 0, confirmed, lines, [`convergence ${Math.round(conv * 100)}%`]);
+  }
+ }
  }}
 
 export function evaluateStrategy(preset:StrategyPreset,input:{series:Record<string,CandleLike[]>;chartCandles:CandleLike[];levels:LevelLike[];densities:DensityLike[];book:BookLike;oiHistory:OiPoint[];fundingHistory:number[];fundingRate:number;currentPrice:number;cascadeRisk?:number}):StrategyResult{const out:StrategyEvent[]=[],c=preset.config,oiMs=c.oiWindow==='24h'?86400000:c.oiWindow==='12h'?43200000:3600000,oiD=c.oiWindow?oiDelta(input.oiHistory,oiMs):NaN,obi=bookImbalance(input.book,input.currentPrice);if(c.kind==='impulse')detectImpulse(out,preset,input.series,oiD);if(c.kind==='breakout')detectBreakout(out,preset,input.series,input.levels,obi,oiD);if(c.kind==='reaction')detectReaction(out,preset,input.series,input.levels,input.densities,obi);if(c.kind==='density')detectDensity(out,preset,input.densities,input.levels,input.currentPrice);if(c.kind==='overheat')detectOverheat(out,preset,input.series,oiD,input.fundingRate,input.fundingHistory,input.levels);if(c.kind==='volatility')detectVolatility(out,preset,input.series,preset.id==='volatility_stable');if(c.kind==='patterns')detectPatterns(out,preset,input.series);
