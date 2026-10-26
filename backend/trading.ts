@@ -10,6 +10,7 @@ import {
 } from "./config";
 import { Mutex, type Store } from "./store";
 import { formationIsVisible, signalAllowsEntry } from "./formationState";
+import { tradingScheduleState } from "./tradingSchedule";
 import type { MarketData } from "./market";
 import type { Vault } from "./security";
 import {
@@ -80,7 +81,8 @@ export class Trading {
     readonly liveAllowed: boolean,
   ) {}
   settings() {
-    return this.store.get("settings", DEFAULT_SETTINGS);
+    const saved = this.store.get<Partial<Settings>>("settings", {});
+    return { ...structuredClone(DEFAULT_SETTINGS), ...saved };
   }
   private book(mode: Mode) {
     return this.store.get(
@@ -157,6 +159,7 @@ export class Trading {
       .filter((signal) => formationIsVisible(signal, s, now));
     return {
       settings: s,
+      entrySchedule: tradingScheduleState(s.tradingSchedule, now),
       positions: b.positions.map(({ intent, ...p }) => ({
         ...p,
         timeframe: p.timeframe || intent?.signal?.timeframe,
@@ -243,6 +246,7 @@ export class Trading {
           }
           if (
             s.autoEntries &&
+            tradingScheduleState(s.tradingSchedule).allowed &&
             !b.pending.length &&
             Date.now() - b.lastEntryAt >= s.entryIntervalSeconds * 1000
           ) {
@@ -268,7 +272,8 @@ export class Trading {
               const signal = signals[(cursor + candidate) % signals.length];
               if (
                 this.book(s.mode).positions.length >= s.maxPositions ||
-                !this.settings().autoEntries
+                !this.settings().autoEntries ||
+                !tradingScheduleState(this.settings().tradingSchedule).allowed
               )
                 break;
               try {
@@ -304,6 +309,8 @@ export class Trading {
     const s = this.settings(),
       b = this.book(s.mode),
       now = Date.now();
+    if (automatic && (!s.autoEntries || !tradingScheduleState(s.tradingSchedule, now).allowed))
+      throw new Error("Автоматичні входи призупинено або зараз поза торговим розкладом");
     if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !Number.isInteger(signal.confidence) ||
       signal.confidence < 0 || signal.confidence > 100)
       throw new Error("Сигнал потребує нового сканування та оцінювання");
@@ -398,6 +405,9 @@ export class Trading {
       );
       await this.gateway.prepare(s.exchange, signal.symbol, s.leverage);
     }
+    // Quotes, account reads and exchange preparation may span the session boundary.
+    if (automatic && !tradingScheduleState(s.tradingSchedule).allowed)
+      throw new Error("Торгова сесія завершилася під час підготовки входу");
     const intent: Intent = {
       id: orderId(),
       exchange: s.exchange,

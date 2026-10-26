@@ -22,10 +22,13 @@ import { HookChart, type HookChartProps } from "./components/HookChart";
 import { api, setCsrf } from "./api";
 import { FORMATION_LABELS_UK } from "./formationLabels";
 import { scanIsOverdue, screenerEmptyState } from "./screenerStatus";
+import { TradingScheduleSettings } from "./components/TradingScheduleSettings";
+import type { TradingScheduleState } from "../backend/tradingSchedule";
 import "./dashboard.css";
 
 type Snapshot = {
   settings: Settings;
+  entrySchedule: TradingScheduleState;
   positions: any[];
   history: any[];
   pending: any[];
@@ -480,6 +483,8 @@ function SettingsPanel({
             Лише підтверджені формації
           </label>
         </div>
+        <TradingScheduleSettings value={form.tradingSchedule}
+          onChange={tradingSchedule => setForm({ ...form, tradingSchedule })} />
         <div className="form-grid">
           {fields.map((f) => (
             <label key={f.key}>
@@ -923,7 +928,9 @@ export default function App() {
               <p className="muted">
                 USDT perpetual · {s.timeframes.join(" / ")} ·{" "}
                 {s.autoEntries
-                  ? "Автоматичні входи увімкнено"
+                  ? data.entrySchedule?.allowed === false
+                    ? "Автоматичні входи очікують торгової сесії"
+                    : "Автоматичні входи увімкнено"
                   : "Автоматичні входи на паузі"}
               </p>
             </div>
@@ -945,6 +952,16 @@ export default function App() {
               {scan.running ? "Скануємо…" : "Сканувати пакет"}
             </button>
           </div>
+          {data.entrySchedule?.enabled && (
+            <div className="notice schedule-banner" role="status">
+              <Clock3 size={16} />
+              <span>{data.entrySchedule.allowed
+                ? `Розклад: ${data.entrySchedule.activeWindows.join(", ")}.`
+                : "Поза торговим розкладом: нові автоматичні входи призупинено."}
+                {" "}Супровід відкритих позицій працює постійно.
+              </span>
+            </div>
+          )}
           {(error || refreshError) && (
             <div role="alert" className="notice error">
               {error || refreshError}

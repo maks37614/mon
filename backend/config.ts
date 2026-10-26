@@ -1,3 +1,5 @@
+import { DEFAULT_TRADING_SCHEDULE, validateTradingSchedule } from "./tradingSchedule";
+
 export const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"] as const;
 export const FORMATION_ANALYSIS_VERSION = 2;
 export const FORMATIONS = [
@@ -33,6 +35,7 @@ export const DEFAULT_SETTINGS = {
   confirmedOnly: true,
   autoEntries: false,
   reverseEnabled: false,
+  tradingSchedule: structuredClone(DEFAULT_TRADING_SCHEDULE),
   maxPositions: 5,
   initialBalance: 1000,
   orderNotionalUsdt: 25,
@@ -59,7 +62,7 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
   const raw = input as Record<string, unknown>;
   if (Object.keys(raw).some((k) => !Object.hasOwn(DEFAULT_SETTINGS, k)))
     throw new Error("Невідомий параметр");
-  const s = { ...previous, ...raw } as Settings;
+  const s = { ...DEFAULT_SETTINGS, ...previous, ...raw } as Settings;
   if (
     !["binance", "bybit"].includes(s.exchange) ||
     !["paper", "live"].includes(s.mode)
@@ -112,6 +115,7 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
   for (const k of ["confirmedOnly", "autoEntries", "reverseEnabled"])
     if (typeof s[k as keyof Settings] !== "boolean")
       throw new Error(`Параметр ${k} має бути логічним`);
+  s.tradingSchedule = validateTradingSchedule(s.tradingSchedule);
   return s;
 }
 
