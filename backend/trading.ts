@@ -5,6 +5,7 @@ import {
   validateSettings,
   type Settings,
   type Signal,
+  type TradeHistoryEntry,
   type Mode,
   type Exchange,
 } from "./config";
@@ -47,7 +48,7 @@ type Book = {
   balance: number;
   startBalance: number;
   positions: Position[];
-  history: any[];
+  history: TradeHistoryEntry[];
   pending: Intent[];
   used: Record<string, number>;
   lastEntries: Record<string, number>;
@@ -573,6 +574,9 @@ export class Trading {
       direction: p.direction,
       formation: p.formation,
       timeframe: p.timeframe || p.intent?.signal?.timeframe,
+      signalDirection: p.intent?.signal?.direction,
+      signalConfidence: p.intent?.signal?.confidence,
+      signalStatus: p.intent?.signal?.status,
       entryPrice: p.entryPrice,
       exitPrice: price,
       stopLoss: p.stopLoss,
@@ -684,6 +688,9 @@ export class Trading {
       direction: p.direction,
       formation: p.formation,
       timeframe: p.timeframe || p.intent?.signal?.timeframe,
+      signalDirection: p.intent?.signal?.direction,
+      signalConfidence: p.intent?.signal?.confidence,
+      signalStatus: p.intent?.signal?.status,
       entryPrice: p.entryPrice,
       exitPrice: exit,
       stopLoss: p.stopLoss,

@@ -18,10 +18,12 @@ import {
   TIMEFRAMES,
   type Settings,
   type Signal,
+  type TradeHistoryEntry,
 } from "../backend/config";
 import { HookChart, type HookChartProps } from "./components/HookChart";
 import { api, setCsrf } from "./api";
 import { FORMATION_LABELS_UK } from "./formationLabels";
+import { signalConfirmationLabel, tradeHistoryCsv } from "./tradeHistoryCsv";
 import { scanIsOverdue, screenerEmptyState } from "./screenerStatus";
 import { TradingScheduleSettings } from "./components/TradingScheduleSettings";
 import type { TradingScheduleState } from "../backend/tradingSchedule";
@@ -31,7 +33,7 @@ type Snapshot = {
   settings: Settings;
   entrySchedule: TradingScheduleState;
   positions: any[];
-  history: any[];
+  history: TradeHistoryEntry[];
   pending: any[];
   stats: any;
   scanner: any;
@@ -793,35 +795,7 @@ export default function App() {
       `${text}\nБуде надіслано реальний ордер на ${s.exchange === "binance" ? "Binance" : "Bybit"}.`,
     );
   function exportCsv() {
-    const rows = [
-      [
-        "Монета",
-        "Напрям",
-        "Вхід",
-        "Вихід",
-        "Кількість",
-        "PnL",
-        "Комісія",
-        "Закрито",
-      ],
-      ...data!.history.map((t) => [
-        t.symbol,
-        t.direction,
-        t.entryPrice,
-        t.exitPrice,
-        t.quantity,
-        t.netPnl,
-        t.fee,
-        date(t.closedAt),
-      ]),
-    ];
-    const csv =
-      "\uFEFF" +
-      rows
-        .map((r) =>
-          r.map((v) => `"${String(v).replaceAll('"', '""')}"`).join(";"),
-        )
-        .join("\r\n");
+    const csv = tradeHistoryCsv(data!.history);
     const url = URL.createObjectURL(
       new Blob([csv], { type: "text/csv;charset=utf-8" }),
     );
@@ -1265,10 +1239,15 @@ export default function App() {
                           <tr>
                             <th>Контракт</th>
                             <th>Напрям</th>
+                            <th>Формація</th>
+                            <th title="Оцінка та підтвердження первинного сигналу на момент входу">
+                              Оцінка / підтвердження
+                            </th>
                             <th>Вхід</th>
                             <th>Вихід</th>
                             <th>Чистий P&L</th>
                             <th>Причина</th>
+                            <th>Відкрито</th>
                             <th>Закрито</th>
                           </tr>
                         </thead>
@@ -1285,8 +1264,19 @@ export default function App() {
                                   {t.symbol}
                                   <BarChart3 size={13} aria-hidden="true" />
                                 </button>
+                                <small>TF: {t.timeframe || "—"}</small>
                               </td>
-                              <td>{t.direction}</td>
+                              <td>
+                                {t.direction}
+                                {t.signalDirection && t.signalDirection !== t.direction ? (
+                                  <small>Сигнал: {t.signalDirection}</small>
+                                ) : null}
+                              </td>
+                              <td>{FORMATION_LABELS_UK[t.formation] || t.formation || "—"}</td>
+                              <td>
+                                {t.signalConfidence == null ? "—" : `${t.signalConfidence} / 100`}
+                                <small>{signalConfirmationLabel(t.signalStatus) || "Немає даних"}</small>
+                              </td>
                               <td>{price(t.entryPrice)}</td>
                               <td>{price(t.exitPrice)}</td>
                               <td
@@ -1302,6 +1292,7 @@ export default function App() {
                                 ) : null}
                               </td>
                               <td>{t.reason}</td>
+                              <td>{t.openedAt == null ? "—" : date(t.openedAt)}</td>
                               <td>{date(t.closedAt)}</td>
                             </tr>
                           ))}

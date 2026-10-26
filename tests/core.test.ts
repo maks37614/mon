@@ -222,24 +222,34 @@ test("paper TP uses observed execution price and both fees, without a real order
   );
   assert.equal(f.broker.submitted.length, 0);
 });
-test("trade charts preserve the entry timeframe and actual protection levels after settings change", async (t) => {
+test("trade history preserves the entry signal, timeframe and protection levels after settings change", async (t) => {
   const f = fixture(t);
-  await f.trading.updateSettings({ timeframes: ["15m"] });
-  f.store.set("signals", [signal({ timeframe: "15m" })]);
+  await f.trading.updateSettings({ timeframes: ["15m"], confirmedOnly: false, reverseEnabled: true });
+  f.store.set("signals", [signal({ timeframe: "15m", confidence: 83, status: "watching" })]);
   await f.trading.enter("signal-1");
   const position = f.trading.snapshot().positions[0];
   assert.equal(position.timeframe, "15m");
+  assert.equal(position.direction, "SHORT");
   // Active positions from an earlier release retain the timeframe in their intent.
   const book = f.store.get<any>("book:paper", null);
   delete book.positions[0].timeframe;
   f.store.set("book:paper", book);
   assert.equal(f.trading.snapshot().positions[0].timeframe, "15m");
+  f.store.set("signals", [signal({ timeframe: "4h", confidence: 99, status: "confirmed" })]);
   await f.trading.updateSettings({
     timeframes: ["4h"], takeProfitPercent: 2, stopLossPercent: 1,
+    confirmedOnly: true, reverseEnabled: false, minScore: 95,
   });
   await f.trading.closePosition(position.id);
   const history = f.trading.snapshot().history[0];
   assert.equal(history.timeframe, "15m");
+  assert.equal(history.formation, "Double Bottom");
+  assert.equal(history.signalConfidence, 83);
+  assert.equal(history.signalStatus, "watching");
+  assert.equal(history.signalDirection, "LONG");
+  assert.equal(history.direction, "SHORT");
+  assert.equal(history.openedAt, position.openedAt);
+  assert.ok(history.closedAt >= history.openedAt!);
   assert.equal(history.exchange, position.exchange);
   assert.equal(history.entryPrice, position.entryPrice);
   assert.equal(history.takeProfit, position.takeProfit);
@@ -298,6 +308,7 @@ test("live closing is not recorded until venue position and complete fills agree
   const f = fixture(t, "live");
   await f.trading.enter("signal-1");
   const position = f.trading.snapshot().positions[0];
+  f.store.set("signals", [signal({ timeframe: "4h", confidence: 55, status: "watching" })]);
   const id = position.id;
   f.broker.closingTrades = async () => [];
   await f.trading.closePosition(id);
@@ -326,6 +337,10 @@ test("live closing is not recorded until venue position and complete fills agree
   assert.equal(f.trading.snapshot().positions.length, 0);
   assert.ok(Math.abs(f.trading.snapshot().history[0].exitPrice - 101.6) < 1e-9);
   const history = f.trading.snapshot().history[0];
+  assert.equal(history.signalConfidence, 90);
+  assert.equal(history.signalStatus, "confirmed");
+  assert.equal(history.signalDirection, "LONG");
+  assert.equal(history.openedAt, position.openedAt);
   assert.equal(history.timeframe, position.timeframe);
   assert.equal(history.takeProfit, position.takeProfit);
   assert.equal(history.stopLoss, position.stopLoss);

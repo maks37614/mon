@@ -154,3 +154,29 @@ export type Signal = {
   detectedAt: number;
   description: string;
 };
+
+export type TradeHistoryEntry = {
+  id: string;
+  exchange: Exchange;
+  symbol: string;
+  direction: Signal["direction"];
+  formation: string;
+  timeframe?: string;
+  // Optional for trades closed before signal metadata was recorded.
+  signalDirection?: Signal["direction"];
+  signalConfidence?: number;
+  signalStatus?: Signal["status"];
+  entryPrice: number;
+  exitPrice: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  quantity: number;
+  grossPnl: number;
+  fee: number;
+  netPnl: number;
+  openedAt?: number;
+  closedAt: number;
+  reason: string;
+  estimated: boolean;
+  feesComplete?: boolean;
+};
