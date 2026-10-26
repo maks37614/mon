@@ -20,6 +20,8 @@ import {
 } from "../backend/config";
 import { HookChart, type HookChartProps } from "./components/HookChart";
 import { api, setCsrf } from "./api";
+import { FORMATION_LABELS_UK } from "./formationLabels";
+import { scanIsOverdue, screenerEmptyState } from "./screenerStatus";
 import "./dashboard.css";
 
 type Snapshot = {
@@ -30,6 +32,7 @@ type Snapshot = {
   stats: any;
   scanner: any;
   signals: Signal[];
+  formations?: (Signal & { canEnter?: boolean })[];
   logs: any[];
   credentials: Record<string, { configured: boolean; verified: boolean }>;
   liveAllowed: boolean;
@@ -54,7 +57,7 @@ const date = (at?: number | string) =>
     : "Ще не було";
 
 function Login({ onLogin }: { onLogin: () => Promise<void> }) {
-  const [username, setUsername] = useState("admin"),
+  const [username, setUsername] = useState(""),
     [password, setPassword] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
@@ -98,11 +101,11 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
           Увійдіть, щоб відкрити скрінер, протестувати стратегію та керувати
           торгівлею.
         </p>
-        <form onSubmit={submit}>
+        <form onSubmit={submit} autoComplete="off">
           <label>
             Логін
             <input
-              autoComplete="username"
+              autoComplete="off"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               required
@@ -113,7 +116,7 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
             Пароль
             <input
               type="password"
-              autoComplete="current-password"
+              autoComplete="off"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
@@ -168,8 +171,8 @@ const fields: {
   },
   {
     key: "maxSignalAgeSeconds",
-    label: "Максимальний вік після закриття свічки, с",
-    hint: "Для старших таймфреймів збільште цей інтервал.",
+    label: "Максимальний вік сигналу для входу, с",
+    hint: "Обмежує нові торгові входи. У скрінері формація видима до наступної свічки свого таймфрейму.",
     min: 30,
     max: 86400,
   },
@@ -554,7 +557,7 @@ function SettingsPanel({
                   checked={form.formationTypes.includes(name)}
                   onChange={() => toggle("formationTypes", name)}
                 />
-                {name}
+                {FORMATION_LABELS_UK[name] || name}
               </label>
             ))}
           </div>
@@ -753,11 +756,19 @@ export default function App() {
       initialTimeframe: TIMEFRAMES.includes(timeframe) ? timeframe : "1m",
     });
   }
-  const signals = data.signals.filter((signal) =>
-    `${signal.symbol} ${signal.formation}`
+  const formations: (Signal & { canEnter?: boolean })[] = [...(data.formations || data.signals)];
+  formations.sort((left, right) =>
+    Number(right.canEnter !== false) - Number(left.canEnter !== false) ||
+    right.detectedAt - left.detectedAt || right.confidence - left.confidence);
+  const signals = formations.filter((signal) =>
+    `${signal.symbol} ${signal.formation} ${FORMATION_LABELS_UK[signal.formation] || ""}`
       .toLowerCase()
       .includes(query.toLowerCase()),
   );
+  const emptyScreener = screenerEmptyState(scan, s, data.schedulerMode,
+    !!query.trim(), formations.length);
+  const displayedSignals = signals.slice(0, 200);
+  const scanOverdue = scanIsOverdue(scan, s);
   const remaining = scan.total ? scan.total - (scan.cursor || 0) : 0;
   const minutes = scan.total
     ? (Math.ceil(scan.total / s.scanBatchSize) *
@@ -878,7 +889,7 @@ export default function App() {
               <Icon size={18} />
               {label}
               {id === "screener" && (
-                <span className="count">{data.signals.length}</span>
+                <span className="count">{formations.length}</span>
               )}
             </button>
           ))}
@@ -914,8 +925,13 @@ export default function App() {
               disabled={busy || scan.running}
               onClick={() =>
                 run(
-                  () => api("/api/scan", {}),
-                  "Пакет сканування запущено або вже виконується",
+                  async () => {
+                    const result = await api("/api/scan", {});
+                    if (!result.accepted && result.reason === "interval")
+                      throw new Error(`Між пакетами потрібна пауза ${s.scanIntervalSeconds} с. Перевірте час останнього запуску.`);
+                    return result;
+                  },
+                  "Пакет сканування запущено",
                 )
               }
             >
@@ -1088,6 +1104,12 @@ export default function App() {
                   <span className="muted">
                     Останній запуск: {date(scan.lastStartedAt)}
                   </span>
+                  <span className="muted">
+                    Останній пакет: {scan.processed || 0} завдань · знайдено {scan.detected ?? "—"} · помилок {scan.failed || 0}
+                  </span>
+                  {data.schedulerMode === "external" && (
+                    <span className="muted">Виклик cron: {date(scan.lastCronAt)}</span>
+                  )}
                   {scan.error && (
                     <span className="negative-text">{scan.error}</span>
                   )}
@@ -1273,9 +1295,12 @@ export default function App() {
                         <span className="muted">{signals.length}</span>
                       </h2>
                       <p className="muted">
-                        Пошук на закритих свічках. Якщо патернів немає, сигнали
-                        не вигадуються.
+                        Формації останніх закритих свічок. Відображення залежить
+                        від таймфрейму; для нового входу діє окремий ліміт {s.maxSignalAgeSeconds} с.
                       </p>
+                      {signals.length > displayedSignals.length && (
+                        <p className="muted">Показано перші {displayedSignals.length} із {signals.length}. Уточніть пошук, щоб побачити інші монети.</p>
+                      )}
                     </div>
                     <input
                       className="search"
@@ -1285,6 +1310,11 @@ export default function App() {
                       onChange={(e) => setQuery(e.target.value)}
                     />
                   </div>
+                  {scanOverdue && (
+                    <div role="status" className="notice">
+                      Сканування не оновлюється регулярно. Перевірте {data.schedulerMode === "external" ? "завдання cron-job.org" : "внутрішній розклад"}; останній пакет завершено {date(scan.finishedAt)}.
+                    </div>
+                  )}
                   <div className="table-wrap">
                     <table>
                       <thead>
@@ -1299,7 +1329,7 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {signals.map((signal) => (
+                        {displayedSignals.map((signal) => (
                           <tr key={signal.id}>
                             <td>
                               <button
@@ -1313,7 +1343,7 @@ export default function App() {
                               </button>
                               <small>{signal.timeframe}</small>
                             </td>
-                            <td>{signal.formation}</td>
+                            <td>{FORMATION_LABELS_UK[signal.formation] || signal.formation}</td>
                             <td>
                               <span
                                 className={`pill ${signal.direction === "LONG" ? "positive" : "live"}`}
@@ -1331,7 +1361,10 @@ export default function App() {
                             </td>
                             <td>
                               <button
-                                disabled={busy}
+                                disabled={busy || ("canEnter" in signal && signal.canEnter === false)}
+                                title={"canEnter" in signal && signal.canEnter === false
+                                  ? "Формація видима для аналізу, але максимальний вік нового входу вже минув"
+                                  : undefined}
                                 onClick={() => {
                                   if (
                                     confirmLive(
@@ -1347,7 +1380,9 @@ export default function App() {
                                     );
                                 }}
                               >
-                                {live ? "Реальний вхід" : "Тестовий вхід"}
+                                {"canEnter" in signal && signal.canEnter === false
+                                  ? "Вік входу вичерпано"
+                                  : live ? "Реальний вхід" : "Тестовий вхід"}
                               </button>
                             </td>
                           </tr>
@@ -1357,11 +1392,8 @@ export default function App() {
                     {!signals.length && (
                       <div className="empty">
                         <Activity size={28} />
-                        <strong>Свіжих формацій за цими фільтрами немає</strong>
-                        <span>
-                          Запустіть сканування або дочекайтеся наступного
-                          зовнішнього cron.
-                        </span>
+                        <strong>{emptyScreener.title}</strong>
+                        <span>{emptyScreener.detail}</span>
                       </div>
                     )}
                   </div>

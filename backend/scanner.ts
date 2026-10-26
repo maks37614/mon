@@ -2,6 +2,7 @@ import { DEFAULT_SETTINGS, type Settings, type Signal } from "./config";
 import type { Store } from "./store";
 import type { MarketData } from "./market";
 import { detectFormations } from "./patterns";
+import { formationIsVisible, signalAllowsEntry } from "./formationState";
 
 export class Scanner {
   running = false;
@@ -10,9 +11,18 @@ export class Scanner {
     private store: Store,
     private market: MarketData,
   ) {}
-  start(force = false) {
+  private saveStatus(status: any) {
+    const latest = this.store.get<any>("scanner", {});
+    this.store.set("scanner", { ...status, lastCronAt: latest.lastCronAt || status.lastCronAt });
+  }
+  start(force = false, source: "manual" | "cron" | "internal" = "manual") {
     const settings = this.store.get("settings", DEFAULT_SETTINGS);
-    const state = this.store.get<any>("scanner", {});
+    let state = this.store.get<any>("scanner", {});
+    const now = Date.now();
+    if (source === "cron") {
+      state = { ...state, lastCronAt: now };
+      this.store.set("scanner", state);
+    }
     if (this.running) return { accepted: false, reason: "running" };
     if (
       !force &&
@@ -21,13 +31,17 @@ export class Scanner {
     )
       return { accepted: false, reason: "interval" };
     this.running = true;
-    this.task = this.run(settings)
+    state = { ...state, running: true, lastStartedAt: now, lastTrigger: source,
+      processed: 0, successful: 0, failed: 0, detected: 0, errors: [], error: null };
+    this.saveStatus(state);
+    this.task = this.run(settings, state)
       .catch((e) => {
         this.store.log("ERROR", `Сканування: ${e.message}`);
-        this.store.set("scanner", {
+        this.saveStatus({
           ...this.store.get<any>("scanner", {}),
           error: e.message,
           running: false,
+          finishedAt: Date.now(),
         });
       })
       .finally(() => {
@@ -35,14 +49,14 @@ export class Scanner {
       });
     return { accepted: true };
   }
-  private async run(settings: Settings) {
-    const signature = `${settings.exchange}:${settings.timeframes.join(",")}:${settings.candleLimit}`;
-    const old = this.store.get<any>("scanner", {});
+  private async run(settings: Settings, old: any) {
+    const signature = `interleaved:${settings.exchange}:${settings.timeframes.join(",")}:${settings.candleLimit}`;
     let cursor = old.signature === signature ? old.cursor || 0 : 0;
     const markets = await this.market.getMarkets(settings.exchange);
-    const tasks = settings.timeframes.flatMap((timeframe) =>
-      markets.map((m) => ({ symbol: m.symbol, timeframe })),
+    const tasks = markets.flatMap((m) =>
+      settings.timeframes.map((timeframe) => ({ symbol: m.symbol, timeframe })),
     );
+    if (!tasks.length) throw new Error("Біржа не повернула монети для сканування");
     cursor %= tasks.length;
     let status: any = {
       ...old,
@@ -54,18 +68,13 @@ export class Scanner {
       processed: 0,
       failed: 0,
       running: true,
-      lastStartedAt: Date.now(),
       lastFullPassAt: old.signature === signature ? old.lastFullPassAt : null,
       error: null,
     };
-    this.store.set("scanner", status);
+    this.saveStatus(status);
     const existing = this.store
       .get<Signal[]>("signals", [])
-      .filter(
-        (s) =>
-          s.exchange === settings.exchange &&
-          Date.now() - s.candleAt <= settings.maxSignalAgeSeconds * 1000,
-      );
+      .filter((signal) => formationIsVisible(signal, settings));
     const signals = new Map(existing.map((s) => [s.id, s]));
     const count = Math.min(settings.scanBatchSize, tasks.length);
     for (let index = 0; index < count; index++) {
@@ -84,16 +93,23 @@ export class Scanner {
             signal.timeframe === target.timeframe
           )
             signals.delete(id);
-        for (const signal of detectFormations(
+        const found = detectFormations(
           candles,
           settings.exchange,
           target.symbol,
           target.timeframe,
           settings,
-        ))
+        );
+        status.successful++;
+        status.detected += found.length;
+        for (const signal of found)
           signals.set(signal.id, signal);
       } catch (e: any) {
         status.failed++;
+        if (status.errors.length < 3) status.errors.push({
+          symbol: target.symbol, timeframe: target.timeframe,
+          message: String(e.message || "Не вдалося отримати свічки").slice(0, 200),
+        });
         if ((this.market.status()[settings.exchange] || 0) > Date.now()) {
           status.error = e.message;
           break;
@@ -105,14 +121,11 @@ export class Scanner {
       // Persist progress and publish completed results without waiting for the entire universe.
       if (index % 10 === 0 || index === count - 1) {
         status = { ...status, cursor };
-        this.store.set("scanner", status);
+        this.saveStatus(status);
         this.store.set(
           "signals",
           [...signals.values()]
-            .filter(
-              (s) =>
-                Date.now() - s.candleAt <= settings.maxSignalAgeSeconds * 1000,
-            )
+            .filter((signal) => formationIsVisible(signal, settings))
             .slice(-20_000),
         );
       }
@@ -121,20 +134,23 @@ export class Scanner {
     this.store.set(
       "signals",
       [...signals.values()]
-        .filter(
-          (s) => Date.now() - s.candleAt <= settings.maxSignalAgeSeconds * 1000,
-        )
+        .filter((signal) => formationIsVisible(signal, settings))
         .slice(-20_000),
     );
-    this.store.set("scanner", {
+    if (!status.successful && status.failed && !status.error)
+      status.error = status.errors[0]?.message || "Дані свічок не завантажилися";
+    const retained = [...signals.values()].filter((signal) => formationIsVisible(signal, settings));
+    this.saveStatus({
       ...status,
       cursor,
       running: false,
       finishedAt: Date.now(),
+      visibleFormations: retained.length,
+      entrySignals: retained.filter((signal) => signalAllowsEntry(signal, settings)).length,
     });
     this.store.log(
       status.error ? "WARN" : "INFO",
-      `Сканування ${settings.exchange}: ${status.processed}/${tasks.length} пар/таймфреймів, помилок ${status.failed}; наступний індекс ${cursor}`,
+      `Сканування ${settings.exchange}: ${status.processed}/${tasks.length} пар/таймфреймів, помилок ${status.failed}; знайдено ${status.detected}, у скрінері ${retained.length}; наступний індекс ${cursor}`,
     );
   }
 }

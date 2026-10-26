@@ -8,6 +8,7 @@ import {
   type Exchange,
 } from "./config";
 import { Mutex, type Store } from "./store";
+import { formationIsVisible, signalAllowsEntry } from "./formationState";
 import type { MarketData } from "./market";
 import type { Vault } from "./security";
 import {
@@ -150,6 +151,9 @@ export class Trading {
       pnl = b.positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
     const history = b.history,
       wins = history.filter((t) => t.netPnl > 0).length;
+    const now = Date.now();
+    const formations = this.store.get<Signal[]>("signals", [])
+      .filter((signal) => formationIsVisible(signal, s, now));
     return {
       settings: s,
       positions: b.positions.map(({ intent, ...p }) => ({
@@ -176,14 +180,10 @@ export class Trading {
         winRate: history.length ? (wins / history.length) * 100 : 0,
         accountAt: b.accountAt || null,
       },
-      signals: this.store
-        .get<Signal[]>("signals", [])
-        .filter(
-          (x) =>
-            x.exchange === s.exchange &&
-            Date.now() - x.candleAt <= s.maxSignalAgeSeconds * 1000 &&
-            s.formationTypes.includes(x.formation),
-        ),
+      signals: formations.filter((signal) => signalAllowsEntry(signal, s, now)),
+      formations: formations.map((signal) => ({
+        ...signal, canEnter: signalAllowsEntry(signal, s, now),
+      })),
       scanner: this.store.get<any>("scanner", {}),
       logs: this.store.get<any[]>("logs", []),
       liveAllowed: this.liveAllowed,
