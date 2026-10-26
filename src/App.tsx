@@ -55,7 +55,7 @@ const date = (at?: number | string) =>
     : "Ще не було";
 
 function Login({ onLogin }: { onLogin: () => Promise<void> }) {
-  const [username, setUsername] = useState("admin"),
+  const [username, setUsername] = useState(""),
     [password, setPassword] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
@@ -99,11 +99,11 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
           Увійдіть, щоб відкрити скрінер, протестувати стратегію та керувати
           торгівлею.
         </p>
-        <form onSubmit={submit}>
+        <form onSubmit={submit} autoComplete="off">
           <label>
             Логін
             <input
-              autoComplete="username"
+              autoComplete="off"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               required
@@ -114,7 +114,7 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
             Пароль
             <input
               type="password"
-              autoComplete="current-password"
+              autoComplete="off"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
