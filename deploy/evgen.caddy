@@ -1,0 +1,6 @@
+# Add this as a separate virtual host alongside the existing h00k.top host.
+# Do not replace the existing Caddyfile.
+evgen.h00k.top {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3010
+}

@@ -16,12 +16,16 @@ import {
 } from 'lucide-react';
 import { Timeframe } from '../types/trading';
 import { HookChartCanvas, Candle } from './HookChartCanvas';
+import { tfMs } from '../../backend/config';
 
 export interface HookChartProps {
   symbol: string;
+  exchange?: 'binance' | 'bybit';
   entryPrice?: number;
   stopLoss?: number;
   takeProfit?: number;
+  entryTimestamp?: number;
+  focusAt?: number;
   currentPrice?: number;
   direction?: 'LONG' | 'SHORT';
   formationName?: string;
@@ -43,16 +47,18 @@ function getCandleCountdown(tf: string) {
     case '30m': n = 1800000; break;
     case '1h': n = 3600000; break;
     case '4h': n = 14400000; break;
+    case '1d': n = 86400000; break;
     default: n = 60000;
   }
   const r = Math.ceil(t / n) * n;
   const diff = Math.max(0, r - t);
   const totalSec = Math.floor(diff / 1000);
   const m = Math.floor((totalSec % 3600) / 60);
+  const h = Math.floor(totalSec / 3600);
   const s = totalSec % 60;
   const isUrgent = totalSec <= (tf === '1m' ? 15 : tf === '5m' ? 30 : 45);
   return {
-    formatted: `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`,
+    formatted: `${h > 0 ? `${h}:` : ''}${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`,
     totalSec,
     isUrgent,
   };
@@ -60,9 +66,12 @@ function getCandleCountdown(tf: string) {
 
 export const HookChart: React.FC<HookChartProps> = ({
   symbol,
+  exchange = 'binance',
   entryPrice,
   stopLoss,
   takeProfit,
+  entryTimestamp,
+  focusAt,
   currentPrice: initialCurrentPrice,
   direction = 'LONG',
   formationName,
@@ -80,6 +89,8 @@ export const HookChart: React.FC<HookChartProps> = ({
   const [livePrice, setLivePrice] = useState<number>(initialCurrentPrice || entryPrice || 0);
   const [candles, setCandles] = useState<Candle[]>([]);
   const [activeTool, setActiveTool] = useState<string>('cursor');
+  const [dataError, setDataError] = useState('');
+  const historical = Number.isFinite(focusAt) && focusAt > 0;
 
   const isDisposedRef = useRef<boolean>(false);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -120,90 +131,80 @@ export const HookChart: React.FC<HookChartProps> = ({
   // Fetch real klines from backend
   const fetchKlines = useCallback(async () => {
     if (isDisposedRef.current) return;
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     try {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
+      const query = new URLSearchParams({ symbol, exchange, interval: timeframe, limit: '300' });
+      if (historical) {
+        query.set('endTime', String(Math.min(Date.now(), focusAt + tfMs(timeframe) * 90)));
       }
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-
       const res = await fetch(
-        `/api/binance/klines?symbol=${encodeURIComponent(symbol)}&interval=${timeframe}&limit=160`,
+        `/api/market/klines?${query}`,
         { signal: controller.signal }
       );
-
-      if (isDisposedRef.current) return;
-
-      if (res.ok) {
-        const raw = await res.json();
-        if (isDisposedRef.current) return;
-
-        if (Array.isArray(raw) && raw.length > 0) {
-          const formattedCandles: Candle[] = raw.map((k: any) => ({
-            t: k.time,
-            o: k.open,
-            h: k.high,
-            l: k.low,
-            c: k.close,
-            v: k.volume,
-            n: 0,
-          }));
-
-          setCandles(formattedCandles);
-
-          const latest = formattedCandles[formattedCandles.length - 1];
-          setLivePrice(latest.c);
-
-          const highs = formattedCandles.map((k) => k.h);
-          const lows = formattedCandles.map((k) => k.l);
-          const totalVol = formattedCandles.reduce((sum, k) => sum + k.v, 0);
-          setStats24h({
-            high: Math.max(...highs),
-            low: Math.min(...lows),
-            volume: Math.round(totalVol),
-          });
-        }
+      if (isDisposedRef.current || controller.signal.aborted) return;
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({}));
+        throw new Error(error.error || `Не вдалося завантажити свічки (HTTP ${res.status})`);
       }
+      const raw = await res.json();
+      if (isDisposedRef.current || controller.signal.aborted) return;
+      if (!Array.isArray(raw) || !raw.length) {
+        throw new Error('Для цього контракту та періоду свічки відсутні');
+      }
+      const formattedCandles: Candle[] = raw.map((k: any) => ({
+        t: k.time,
+        o: k.open,
+        h: k.high,
+        l: k.low,
+        c: k.close,
+        v: k.volume,
+        n: 0,
+      }));
+      setCandles(formattedCandles);
+      setDataError('');
+      setLivePrice(formattedCandles.at(-1)!.c);
+      setStats24h({
+        high: Math.max(...formattedCandles.map((k) => k.h)),
+        low: Math.min(...formattedCandles.map((k) => k.l)),
+        volume: Math.round(formattedCandles.reduce((sum, k) => sum + k.v, 0)),
+      });
     } catch (err: any) {
-      if (err.name !== 'AbortError' && !isDisposedRef.current) {
-        console.error('Failed to load klines for HookChart:', err);
+      if (!controller.signal.aborted && !isDisposedRef.current) {
+        setDataError(err.message || 'Не вдалося завантажити свічки');
       }
     } finally {
-      if (!isDisposedRef.current) {
+      if (!isDisposedRef.current && abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
         setIsLoading(false);
       }
     }
-  }, [symbol, timeframe]);
+  }, [symbol, timeframe, exchange, focusAt, historical]);
 
   // Initial fetch on symbol / timeframe change
   useEffect(() => {
+    setCandles([]);
+    setDataError('');
     setIsLoading(true);
-    fetchKlines();
+    void fetchKlines();
+    return () => abortControllerRef.current?.abort();
   }, [fetchKlines]);
 
   // Periodic klines refresh every 3 seconds
   useEffect(() => {
-    if (provider !== 'hookchart') return;
+    if (provider !== 'hookchart' || historical) return;
     const interval = setInterval(() => {
-      if (!isDisposedRef.current) {
-        fetchKlines();
+      if (!isDisposedRef.current && !abortControllerRef.current) {
+        void fetchKlines();
       }
     }, 3000);
     return () => clearInterval(interval);
-  }, [provider, fetchKlines]);
+  }, [provider, fetchKlines, historical]);
 
   // TradingView widget URL
-  const tvInterval =
-    timeframe === '1m'
-      ? '1'
-      : timeframe === '5m'
-      ? '5'
-      : timeframe === '15m'
-      ? '15'
-      : timeframe === '1h'
-      ? '60'
-      : '240';
-  const tvSymbol = `BINANCE:${symbol.toUpperCase()}.P`;
+  const tvInterval = ({ '1m': '1', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '4h': '240', '1d': 'D' } as const)[timeframe];
+  const tvSymbol = `${exchange === 'bybit' ? 'BYBIT' : 'BINANCE'}:${symbol.toUpperCase()}.P`;
   const tvWidgetUrl = `https://s.tradingview.com/widgetembed/?${new URLSearchParams({
     symbol: tvSymbol,
     interval: tvInterval,
@@ -240,7 +241,7 @@ export const HookChart: React.FC<HookChartProps> = ({
     >
       {/* Top Header Controls Toolbar */}
       <div className="px-3 py-1.5 bg-[#0e1319] border-b border-slate-800/90 flex flex-wrap items-center justify-between gap-2 text-xs select-none">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Symbol & Direction Badge */}
           <div className="font-mono font-bold text-slate-100 flex items-center gap-1.5">
             <span className="text-sm">{symbol}</span>
@@ -259,6 +260,7 @@ export const HookChart: React.FC<HookChartProps> = ({
               </span>
             )}
           </div>
+          {historical && <span className="text-cyan-300 text-[11px]">Свічки біля входу</span>}
 
           {/* Formation name */}
           {formationName && (
@@ -303,7 +305,7 @@ export const HookChart: React.FC<HookChartProps> = ({
         </div>
 
         {/* Center / Right: Engine Switcher, Drawing Tools, TF, Controls */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Quick Drawing Tools (HookChart Canvas native) */}
           {provider === 'hookchart' && (
             <div className="hidden lg:flex items-center gap-0.5 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px]">
@@ -379,7 +381,7 @@ export const HookChart: React.FC<HookChartProps> = ({
               <Layers className="w-3 h-3 text-cyan-400" />
               <span>HookChart</span>
             </button>
-            <button
+            {!historical && <button
               onClick={() => setProvider('tradingview')}
               className={`px-2 py-1 rounded transition-colors cursor-pointer ${
                 provider === 'tradingview'
@@ -389,12 +391,12 @@ export const HookChart: React.FC<HookChartProps> = ({
               title="TradingView Pro віджет"
             >
               <span>TradingView</span>
-            </button>
+            </button>}
           </div>
 
           {/* Timeframe Switcher */}
           <div className="flex items-center gap-0.5 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px] font-mono">
-            {(['1m', '5m', '15m', '1h', '4h'] as Timeframe[]).map((tf) => (
+            {(['1m', '5m', '15m', '30m', '1h', '4h', '1d'] as Timeframe[]).map((tf) => (
               <button
                 key={tf}
                 onClick={() => setTimeframe(tf)}
@@ -410,7 +412,7 @@ export const HookChart: React.FC<HookChartProps> = ({
           </div>
 
           {/* Live P&L badge */}
-          {entryPrice && (
+          {entryPrice && !historical && (
             <div className="text-[11px] font-mono flex items-center gap-1 font-semibold pl-1">
               <span className={isProfit ? 'text-emerald-400' : 'text-rose-400'}>
                 {isProfit ? '+' : ''}
@@ -435,7 +437,7 @@ export const HookChart: React.FC<HookChartProps> = ({
       </div>
 
       {/* Main Chart Canvas Stage */}
-      <div className="flex-1 relative w-full h-full min-h-[180px] bg-[#131722]">
+      <div className="flex-1 relative w-full min-h-[180px] overflow-hidden bg-[#131722]">
         {provider === 'hookchart' ? (
           <>
             {isLoading && !candles.length && (
@@ -444,14 +446,25 @@ export const HookChart: React.FC<HookChartProps> = ({
                 <span>Завантаження HookChart ({symbol})...</span>
               </div>
             )}
+            {dataError && (
+              <div role="alert" className="absolute top-2 left-2 right-2 z-20 flex flex-wrap items-center justify-center gap-2 rounded border border-rose-800 bg-slate-950/95 p-3 text-xs text-rose-300">
+                <span>{dataError}</span>
+                <button type="button" onClick={() => { setIsLoading(true); void fetchKlines(); }}>
+                  Повторити
+                </button>
+              </div>
+            )}
 
             <HookChartCanvas
+              key={`${exchange}:${symbol}:${timeframe}:${focusAt || 'live'}`}
               candles={candles}
               symbol={symbol}
               tf={timeframe}
               entryPrice={entryPrice}
               takeProfit={takeProfit}
               stopLoss={stopLoss}
+              entryTimestamp={entryTimestamp}
+              focusAt={focusAt}
               direction={direction}
               formationName={formationName}
               tool={activeTool}
@@ -474,13 +487,13 @@ export const HookChart: React.FC<HookChartProps> = ({
       {/* Market Stats Bar copied verbatim from h00k.top */}
       {!compact && (
         <div className="px-3 py-1 bg-[#0e1319] border-t border-slate-800/80 flex flex-wrap items-center justify-between text-[10px] font-mono text-slate-400">
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <span>
-              Джерело: <b className="text-slate-200">h00k.top / Binance Futures</b>
+              Джерело: <b className="text-slate-200">{exchange === 'bybit' ? 'Bybit' : 'Binance'} Futures</b>
             </span>
             <span aria-hidden="true">·</span>
             <span>
-              Max 24h:{' '}
+              Max ({timeframe}):{' '}
               <b className="text-emerald-400">
                 {stats24h.high
                   ? stats24h.high < 10
@@ -491,7 +504,7 @@ export const HookChart: React.FC<HookChartProps> = ({
             </span>
             <span aria-hidden="true">·</span>
             <span>
-              Min 24h:{' '}
+              Min ({timeframe}):{' '}
               <b className="text-rose-400">
                 {stats24h.low
                   ? stats24h.low < 10
@@ -502,14 +515,14 @@ export const HookChart: React.FC<HookChartProps> = ({
             </span>
             <span aria-hidden="true">·</span>
             <span>
-              Vol 24h:{' '}
+              Обсяг свічок:{' '}
               <b className="text-slate-300">
                 {stats24h.volume.toLocaleString()}
               </b>
             </span>
           </div>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             {stopLoss && (
               <span className="text-rose-400 font-semibold">SL: {stopLoss}</span>
             )}
