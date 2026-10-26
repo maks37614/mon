@@ -80,12 +80,12 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
           <span>
             <img
               className="brand-logo"
-              src="/h00k-logo.svg"
-              alt="h00k.top"
-              width={194}
+              src="/h00k-auto-logo.svg"
+              alt="h00k.auto"
+              width={218}
               height={48}
             />
-            <span className="brand-sub">EVGEN · TRADING TERMINAL</span>
+            <span className="brand-sub">Trading Terminal Platform</span>
           </span>
         </div>
         <div className="eyebrow">ПРИВАТНИЙ ДОСТУП</div>
@@ -815,12 +815,12 @@ export default function App() {
           <span>
             <img
               className="brand-logo"
-              src="/h00k-logo.svg"
-              alt="h00k.top"
-              width={194}
+              src="/h00k-auto-logo.svg"
+              alt="h00k.auto"
+              width={218}
               height={48}
             />
-            <span className="brand-sub">EVGEN · TRADING TERMINAL</span>
+            <span className="brand-sub">Trading Terminal Platform</span>
           </span>
         </a>
         <div className="topbar-right">
