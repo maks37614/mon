@@ -20,6 +20,7 @@ import {
 } from "../backend/config";
 import { HookChart, type HookChartProps } from "./components/HookChart";
 import { api, setCsrf } from "./api";
+import { FORMATION_LABELS_UK } from "./formationLabels";
 import "./dashboard.css";
 
 type Snapshot = {
@@ -554,7 +555,7 @@ function SettingsPanel({
                   checked={form.formationTypes.includes(name)}
                   onChange={() => toggle("formationTypes", name)}
                 />
-                {name}
+                {FORMATION_LABELS_UK[name] || name}
               </label>
             ))}
           </div>
