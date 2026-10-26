@@ -97,7 +97,7 @@ export function createApplication(options: Options) {
       !safeEqual(req.get("authorization") || "", `Bearer ${options.cronSecret}`)
     )
       return res.status(401).json({ error: "Unauthorized" });
-    const result = scanner.start();
+    const result = scanner.start(false, "cron");
     res.status(result.accepted ? 202 : 200).json(result);
   });
   app.use(
@@ -301,7 +301,7 @@ export function createApplication(options: Options) {
     start() {
       trading.start();
       if (options.schedulerMode === "internal")
-        scheduler = setInterval(() => scanner.start(), 10_000);
+        scheduler = setInterval(() => scanner.start(false, "internal"), 10_000);
     },
     async stop() {
       if (scheduler) clearInterval(scheduler);

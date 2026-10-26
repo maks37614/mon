@@ -751,4 +751,6 @@ test("HTTP authentication, CSRF, secret redaction and cron authorization protect
     202,
   );
   await runtime.scanner.task;
+  assert.ok(runtime.store.get<any>("scanner", {}).lastCronAt > 0);
+  assert.equal(runtime.store.get<any>("scanner", {}).lastTrigger, "cron");
 });

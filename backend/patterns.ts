@@ -77,7 +77,8 @@ export function detectFormations(
       });
   }
   return events
-    .filter((e) => settings.formationTypes.includes(e.name))
+    .filter((e) => settings.formationTypes.includes(e.name) &&
+      e.confidence >= settings.minScore && (!settings.confirmedOnly || e.confirmed))
     .flatMap((e) => {
       let direction = e.direction;
       if (direction === "neutral") {
