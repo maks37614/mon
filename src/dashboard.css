@@ -198,6 +198,19 @@ h3 {
   padding: 7px;
   color: #95a7c1;
 }
+.external-link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  text-decoration: none;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.external-link-button:hover {
+  color: #67e8f9;
+  background: #162638;
+  border-radius: 6px;
+}
 .workspace {
   display: flex;
   min-height: calc(100vh - 76px);

@@ -4,6 +4,7 @@ import {
   BarChart3,
   CircleDollarSign,
   Clock3,
+  ExternalLink,
   KeyRound,
   LockKeyhole,
   LogOut,
@@ -91,7 +92,7 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
               width={218}
               height={48}
             />
-            <span className="brand-sub">Trading Terminal Platform</span>
+            <span className="brand-sub">Trading Platform</span>
           </span>
         </div>
         <div className="eyebrow">ПРИВАТНИЙ ДОСТУП</div>
@@ -842,14 +843,20 @@ export default function App() {
               width={218}
               height={48}
             />
-            <span className="brand-sub">Trading Terminal Platform</span>
+            <span className="brand-sub">Trading Platform</span>
           </span>
         </a>
         <div className="topbar-right">
-          <span className={`pill ${live ? "live" : "positive"}`}>
-            <span className="dot" />
-            {live ? "Реальна торгівля" : "Віртуальна торгівля"}
-          </span>
+          <a
+            className="icon-button external-link-button"
+            href="https://h00k.top"
+            target="_blank"
+            rel="noreferrer"
+            title="Відкрити h00k.top"
+            aria-label="Відкрити h00k.top"
+          >
+            <ExternalLink size={18} />
+          </a>
           <span className="exchange-name">{s.exchange.toUpperCase()}</span>
           <button
             className="icon-button"
