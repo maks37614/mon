@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import {
   DEFAULT_SETTINGS,
+  FORMATION_ANALYSIS_VERSION,
   validateSettings,
   type Settings,
   type Signal,
@@ -303,6 +304,9 @@ export class Trading {
     const s = this.settings(),
       b = this.book(s.mode),
       now = Date.now();
+    if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !Number.isInteger(signal.confidence) ||
+      signal.confidence < 0 || signal.confidence > 100)
+      throw new Error("Сигнал потребує нового сканування та оцінювання");
     if (
       signal.exchange !== s.exchange ||
       !s.timeframes.includes(signal.timeframe) ||

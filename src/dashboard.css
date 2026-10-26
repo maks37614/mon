@@ -907,3 +907,6 @@ legend {
     border-color: #24c8a233;
   }
 }
+.score-details summary { cursor: pointer; white-space: nowrap; }
+.score-details div { display: grid; gap: 3px; padding-top: 8px; }
+.score-details p { max-width: 300px; white-space: normal; font-size: 12px; line-height: 1.5; }

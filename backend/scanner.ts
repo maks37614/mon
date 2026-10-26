@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, type Settings, type Signal } from "./config";
+import { DEFAULT_SETTINGS, FORMATION_ANALYSIS_VERSION, type Settings, type Signal } from "./config";
 import type { Store } from "./store";
 import type { MarketData } from "./market";
 import { detectFormations } from "./patterns";
@@ -50,7 +50,7 @@ export class Scanner {
     return { accepted: true };
   }
   private async run(settings: Settings, old: any) {
-    const signature = `interleaved:${settings.exchange}:${settings.timeframes.join(",")}:${settings.candleLimit}`;
+    const signature = `analysis${FORMATION_ANALYSIS_VERSION}:interleaved:${settings.exchange}:${settings.timeframes.join(",")}:${settings.candleLimit}`;
     let cursor = old.signature === signature ? old.cursor || 0 : 0;
     const markets = await this.market.getMarkets(settings.exchange);
     const tasks = markets.flatMap((m) =>

@@ -759,7 +759,7 @@ export default function App() {
   const formations: (Signal & { canEnter?: boolean })[] = [...(data.formations || data.signals)];
   formations.sort((left, right) =>
     Number(right.canEnter !== false) - Number(left.canEnter !== false) ||
-    right.detectedAt - left.detectedAt || right.confidence - left.confidence);
+    right.candleAt - left.candleAt || right.confidence - left.confidence || right.detectedAt - left.detectedAt);
   const signals = formations.filter((signal) =>
     `${signal.symbol} ${signal.formation} ${FORMATION_LABELS_UK[signal.formation] || ""}`
       .toLowerCase()
@@ -1298,6 +1298,10 @@ export default function App() {
                         Формації останніх закритих свічок. Відображення залежить
                         від таймфрейму; для нового входу діє окремий ліміт {s.maxSignalAgeSeconds} с.
                       </p>
+                      <p className="muted">
+                        Оцінка якості: структура до 60, пробій до 25, обсяг до 15 балів.
+                        Це не ймовірність прибутку. Натисніть оцінку, щоб побачити складові.
+                      </p>
                       {signals.length > displayedSignals.length && (
                         <p className="muted">Показано перші {displayedSignals.length} із {signals.length}. Уточніть пошук, щоб побачити інші монети.</p>
                       )}
@@ -1352,12 +1356,22 @@ export default function App() {
                               </span>
                             </td>
                             <td>{price(signal.entryPrice)}</td>
-                            <td>{signal.confidence}/100</td>
+                            <td>
+                              <details className="score-details">
+                                <summary aria-label={`Оцінка ${signal.symbol} ${signal.timeframe}: ${signal.confidence} зі 100`}>{signal.confidence}/100</summary>
+                                {signal.scoreParts ? <div>
+                                  <span>Структура: {signal.scoreParts.structure}/60</span>
+                                  <span>Пробій: {signal.scoreParts.breakout}/25</span>
+                                  <span>Обсяг: {signal.scoreParts.volume}/15</span>
+                                </div> : <div>Для складових потрібне повторне сканування.</div>}
+                                <p>{signal.description}</p>
+                              </details>
+                            </td>
                             <td>
                               {signal.status === "confirmed"
                                 ? "Підтверджена"
                                 : "Формується"}
-                              <small>{date(signal.candleAt)}</small>
+                              <small>{signal.status === "confirmed" ? "Пробій: " : "Перевірено: "}{date(signal.candleAt)}</small>
                             </td>
                             <td>
                               <button

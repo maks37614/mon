@@ -20,7 +20,7 @@ function storage(t: any) {
 }
 
 function doubleBottom(timeframe: string, closedAt = Date.now() - 1000): Candle[] {
-  const anchors = [[0, 105], [12, 110], [20, 100], [28, 106], [36, 100], [43, 107], [49, 108]];
+  const anchors = [[0, 105], [12, 110], [20, 100], [28, 106], [36, 100], [43, 105], [48, 105.5], [49, 108]];
   return Array.from({ length: 50 }, (_, i) => {
     const left = [...anchors].reverse().find(([at]) => at <= i)!;
     const right = anchors.find(([at]) => at > i) || left;
@@ -82,6 +82,20 @@ test("scanner interleaves timeframes and retains visible results outside the cur
   assert.equal(state.successful, 10);
   assert.ok(state.detected > 0);
   assert.ok(store.get<Signal[]>("signals", []).some((signal) => signal.id === retained.id));
+});
+
+test("legacy or invalid scores stay out of the screener and cannot enter before rescanning", async (t) => {
+  const store = storage(t);
+  store.set("settings", DEFAULT_SETTINGS);
+  const fresh = detectFormations(doubleBottom("1m"), "binance", "BTCUSDT", "1m", DEFAULT_SETTINGS)[0];
+  assert.ok(fresh && signalAllowsEntry(fresh, DEFAULT_SETTINGS));
+  const trading = new Trading(store, {} as any, new Vault(store, randomBytes(32).toString("base64")), {} as any, false);
+  for (const invalid of [{ ...fresh, analysisVersion: undefined }, { ...fresh, confidence: NaN }, { ...fresh, confidence: 101 }]) {
+    store.set("signals", [invalid]);
+    assert.equal(trading.snapshot().formations.length, 0);
+    assert.equal(trading.snapshot().signals.length, 0);
+    await assert.rejects(trading.enter(invalid.id), /нового сканування/);
+  }
 });
 
 test("market-list and candle failures are reported as failures rather than empty successful scans", async (t) => {

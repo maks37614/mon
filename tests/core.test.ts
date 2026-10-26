@@ -8,6 +8,7 @@ import { Store } from "../backend/store";
 import { Vault, hashPassword, checkPassword } from "../backend/security";
 import {
   DEFAULT_SETTINGS,
+  FORMATION_ANALYSIS_VERSION,
   validateSettings,
   type Signal,
   type Settings,
@@ -41,6 +42,7 @@ function signal(overrides: Partial<Signal> = {}): Signal {
     stopLoss: 99.75,
     takeProfit: 100.45,
     confidence: 90,
+    analysisVersion: FORMATION_ANALYSIS_VERSION,
     status: "confirmed",
     candleAt: Date.now() - 1000,
     detectedAt: Date.now(),

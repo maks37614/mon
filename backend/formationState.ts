@@ -1,8 +1,10 @@
-import { tfMs, type Settings, type Signal } from "./config";
+import { FORMATION_ANALYSIS_VERSION, tfMs, type Settings, type Signal } from "./config";
 
 export function formationIsVisible(signal: Signal, settings: Settings, now = Date.now()) {
   const visibleFor = Math.max(tfMs(signal.timeframe), settings.maxSignalAgeSeconds * 1000);
-  return signal.exchange === settings.exchange &&
+  return signal.analysisVersion === FORMATION_ANALYSIS_VERSION &&
+    Number.isInteger(signal.confidence) && signal.confidence >= 0 && signal.confidence <= 100 &&
+    signal.exchange === settings.exchange &&
     settings.timeframes.includes(signal.timeframe) &&
     settings.formationTypes.includes(signal.formation) &&
     signal.confidence >= settings.minScore &&

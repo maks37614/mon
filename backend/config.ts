@@ -1,4 +1,5 @@
 export const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"] as const;
+export const FORMATION_ANALYSIS_VERSION = 2;
 export const FORMATIONS = [
   "Double Top",
   "Double Bottom",
@@ -142,6 +143,8 @@ export type Signal = {
   stopLoss: number;
   takeProfit: number;
   confidence: number;
+  analysisVersion?: number;
+  scoreParts?: { structure: number; breakout: number; volume: number };
   status: "confirmed" | "watching";
   candleAt: number;
   detectedAt: number;
