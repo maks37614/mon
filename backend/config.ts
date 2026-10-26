@@ -44,6 +44,8 @@ export const DEFAULT_SETTINGS = {
   stopLossPercent: 0.25,
   slippageTolerancePercent: 0.2,
   takerFeePercent: 0.06,
+  paperFeeMode: "account" as "account" | "manual",
+  paperLatencyMs: 200,
 };
 export const tfMs = (tf: string) =>
   ({
@@ -100,6 +102,7 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
     stopLossPercent: [0.05, 25],
     slippageTolerancePercent: [0.01, 5],
     takerFeePercent: [0, 1],
+    paperLatencyMs: [0, 5000, true],
   };
   for (const [k, [min, max, integer]] of Object.entries(ranges)) {
     const n = raw[k] ?? s[k as keyof Settings];
@@ -115,6 +118,7 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
   for (const k of ["confirmedOnly", "autoEntries", "reverseEnabled"])
     if (typeof s[k as keyof Settings] !== "boolean")
       throw new Error(`Параметр ${k} має бути логічним`);
+  if (!["account", "manual"].includes(s.paperFeeMode)) throw new Error("Невідоме джерело комісії симуляції");
   s.tradingSchedule = validateTradingSchedule(s.tradingSchedule);
   return s;
 }
@@ -134,6 +138,7 @@ export type Market = {
   minQuantity: number;
   minNotional: number;
   tickSize: number;
+  maxQuantity?: number;
 };
 export type Signal = {
   id: string;
@@ -179,4 +184,13 @@ export type TradeHistoryEntry = {
   reason: string;
   estimated: boolean;
   feesComplete?: boolean;
+  entryFee?: number;
+  exitFee?: number;
+  fundingCost?: number;
+  fundingComplete?: boolean;
+  entrySlippage?: number;
+  exitSlippage?: number;
+  executionSource?: string;
+  paper?: import("./paperModel").PaperState;
+  fundingCheckedAt?: number;
 };

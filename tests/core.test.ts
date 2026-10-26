@@ -19,6 +19,7 @@ import { Scanner } from "../backend/scanner";
 import { detectFormations } from "../backend/patterns";
 import { ExchangeGateway } from "../backend/exchange";
 import { createApplication } from "../server";
+import { paperVenue } from "./paperFixture";
 
 function storage(t: any) {
   const directory = mkdtempSync(path.join(process.cwd(), ".test-"));
@@ -52,7 +53,7 @@ function signal(overrides: Partial<Signal> = {}): Signal {
 }
 function fixture(t: any, mode: "paper" | "live" = "paper") {
   const { store, directory } = storage(t);
-  const s = { ...DEFAULT_SETTINGS, mode, entryCooldownSeconds: 0 };
+  const s = { ...DEFAULT_SETTINGS, mode, entryCooldownSeconds: 0, paperLatencyMs: 0 };
   store.set("settings", s);
   store.set("signals", [signal()]);
   const vault = new Vault(store, randomBytes(32).toString("base64"));
@@ -140,6 +141,7 @@ function fixture(t: any, mode: "paper" | "live" = "paper") {
       },
     ],
   };
+  paperVenue(market, broker, () => price);
   const trading = new Trading(store, market, vault, broker, true);
   return {
     trading,
@@ -216,7 +218,7 @@ test("paper TP uses observed execution price and both fees, without a real order
   await f.trading.monitor();
   const state = f.trading.snapshot();
   assert.equal(state.positions.length, 0);
-  assert.equal(state.history[0].exitPrice, 101);
+  assert.ok(Math.abs(state.history[0].exitPrice - 101) < 1e-8);
   assert.ok(
     Math.abs(state.history[0].netPnl - (0.25 - 0.015 - 0.01515)) < 1e-9,
   );
@@ -352,6 +354,24 @@ test("server-level live disable cannot be bypassed by changing settings", async 
     disabled.updateSettings({ mode: "live" }),
     /ENABLE_LIVE_TRADING/,
   );
+});
+
+test("live history reconciles delayed funding without changing the authoritative wallet or resubmitting", async t => {
+  const f = fixture(t, "live");
+  let available = false;
+  f.broker.fundingCost = async () => { if (!available) throw new Error("ledger unavailable"); return -0.02; };
+  await f.trading.enter("signal-1");
+  await f.trading.closePosition(f.trading.snapshot().positions[0].id);
+  await f.trading.monitor();
+  const provisional = f.trading.snapshot().history[0];
+  assert.equal(provisional.fundingComplete, false); assert.equal(provisional.fundingCost, undefined);
+  const requests = f.broker.submitted.length, balance = f.trading.snapshot().stats.balance;
+  const later = Date.now() + 61000; t.mock.method(Date, "now", () => later); available = true;
+  await f.trading.monitor();
+  const final = f.trading.snapshot().history[0];
+  assert.equal(final.fundingComplete, true); assert.equal(final.fundingCost, -0.02);
+  assert.ok(Math.abs(final.netPnl - (final.grossPnl - final.fee + 0.02)) < 1e-9);
+  assert.equal(f.trading.snapshot().stats.balance, balance); assert.equal(f.broker.submitted.length, requests);
 });
 
 test("server-level live disable keeps recovery read-only after a restart", async (t) => {

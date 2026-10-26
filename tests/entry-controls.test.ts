@@ -7,6 +7,7 @@ import { Store } from "../backend/store";
 import { Vault } from "../backend/security";
 import { Trading } from "../backend/trading";
 import { ExchangeGateway } from "../backend/exchange";
+import { paperVenue } from "./paperFixture";
 import { detectFormations } from "../backend/patterns";
 import { evaluateStrategy, strategyPreset } from "../src/chart/strategyEngine";
 import { DEFAULT_SETTINGS, FORMATION_ANALYSIS_VERSION, type Settings, type Signal, type Candle } from "../backend/config";
@@ -26,7 +27,7 @@ function fixture(t: TestContext, overrides: Partial<Settings> = {}, input: Parti
   const directory = mkdtempSync(path.join(process.cwd(), ".test-entry-"));
   const store = new Store(directory);
   t.after(() => { store.close(); rmSync(directory, { recursive: true }); });
-  const settings = { ...DEFAULT_SETTINGS, autoEntries: true, entryCooldownSeconds: 0, ...overrides };
+  const settings = { ...DEFAULT_SETTINGS, autoEntries: true, entryCooldownSeconds: 0, paperLatencyMs: 0, ...overrides };
   store.set("settings", settings);
   const signal = makeSignal({ exchange: settings.exchange, ...input });
   store.set("signals", [signal]);
@@ -51,6 +52,7 @@ function fixture(t: TestContext, overrides: Partial<Settings> = {}, input: Parti
     },
     protection: async (_intent: any, _quantity: any, saved: any) => { saved("stub-sl"); saved("stub-tp"); },
   };
+  paperVenue(market, broker, () => price);
   const trading = new Trading(store, market, vault, broker, true);
   return { store, trading, signal, broker, market, vault, setPrice: (value: number) => { price = value; } };
 }

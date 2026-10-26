@@ -23,7 +23,7 @@ import {
 import { HookChart, type HookChartProps } from "./components/HookChart";
 import { api, setCsrf } from "./api";
 import { FORMATION_LABELS_UK } from "./formationLabels";
-import { signalConfirmationLabel, tradeHistoryCsv } from "./tradeHistoryCsv";
+import { paperWarningsText, signalConfirmationLabel, tradeHistoryCsv } from "./tradeHistoryCsv";
 import { scanIsOverdue, screenerEmptyState } from "./screenerStatus";
 import { TradingScheduleSettings } from "./components/TradingScheduleSettings";
 import type { TradingScheduleState } from "../backend/tradingSchedule";
@@ -53,6 +53,7 @@ const money = (n: number) =>
   });
 const price = (n: number) =>
   Number(n || 0).toLocaleString("en-US", { maximumSignificantDigits: 9 });
+const cost = (n: number) => Number(n || 0).toLocaleString("uk-UA", { minimumFractionDigits: 4, maximumFractionDigits: 8 });
 const date = (at?: number | string) =>
   at
     ? new Intl.DateTimeFormat("uk-UA", {
@@ -215,11 +216,13 @@ const fields: {
   },
   {
     key: "takerFeePercent",
-    label: "Комісія симуляції за сторону, %",
+    label: "Ручний taker-тариф за сторону, %",
+    hint: "Застосовується лише при виборі ручного тарифу симулятора.",
     min: 0,
     max: 1,
     step: 0.001,
   },
+  { key: "paperLatencyMs", label: "Затримка виконання симулятора, мс", hint: "Додаткова модельна затримка перед запитом свіжого стакана. Мережа додає власну затримку.", min: 0, max: 5000 },
   {
     key: "initialBalance",
     label: "Початковий віртуальний баланс, USDT",
@@ -440,7 +443,7 @@ function SettingsPanel({
         </div>
         {!data.liveAllowed && (
           <div className="notice">
-            Віртуальний режим готовий. Для реального режиму власник VPS має
+            Для реального режиму власник VPS має
             встановити ENABLE_LIVE_TRADING=true; потім перевірте API-ключі.
           </div>
         )}
@@ -488,6 +491,14 @@ function SettingsPanel({
         </div>
         <TradingScheduleSettings value={form.tradingSchedule}
           onChange={tradingSchedule => setForm({ ...form, tradingSchedule })} />
+        <label>
+          Комісія симулятора
+          <select value={form.paperFeeMode} onChange={e => setForm({ ...form, paperFeeMode: e.target.value as Settings["paperFeeMode"] })}>
+            <option value="account">Автоматично — тариф акаунта з API</option>
+            <option value="manual">Ручний тариф</option>
+          </select>
+          <small>Автоматичний тариф потребує збережених ключів читання вибраної біржі. Для рівнів маржі Binance також потрібен ключ читання. Bybit надає рівні маржі публічно.</small>
+        </label>
         <div className="form-grid">
           {fields.map((f) => (
             <label key={f.key}>
@@ -571,9 +582,11 @@ function SettingsPanel({
           </div>
         </fieldset>
         <div className="notice">
-          Віртуальні угоди використовують поточні ціни та задану комісію.
-          Прослизання, funding і ліквідації не моделюються; результати симуляції
-          не дорівнюють реальному виконанню.
+          Симулятор використовує свіжий стакан, taker-комісії, funding та mark price.
+          Маржа — isolated для кожної позиції. Прослизання вже включене в ціну виконання.
+          Ліквідація моделюється як втрата залишку виділеної маржі; cross, часткова ліквідація та ADL не відтворюються.
+          Видимого стакана має вистачати на весь ордер. Funding Bybit оцінюється за mark-свічкою на момент нарахування.
+          Це модель виконання; черга, прихована ліквідність і персональні знижки оплати комісій можуть відрізнятися від біржі.
         </div>
         <div className="button-row">
           <button className="primary" type="submit">
@@ -1127,7 +1140,7 @@ export default function App() {
                         Відкриті позиції{" "}
                         <span className="muted">{data.positions.length}</span>
                       </h2>
-                      <span className="muted">Супровід кожні 5 секунд</span>
+                      <span className="muted">{live ? "Звірка кожні 5 секунд" : "Потік цін · перевірка щосекунди"}</span>
                     </div>
                     <div className="table-wrap">
                       <table>
@@ -1137,7 +1150,8 @@ export default function App() {
                             <th>Напрям</th>
                             <th>Вхід / поточна</th>
                             <th>TP / SL</th>
-                            <th>P&L</th>
+                            <th>{live ? "P&L" : "P&L mark / нетто"}</th>
+                            {!live && <th>Маржа / funding / витрати</th>}
                             <th>Тайм-стоп</th>
                             <th />
                           </tr>
@@ -1186,7 +1200,20 @@ export default function App() {
                                 }
                               >
                                 {money(p.unrealizedPnl)}
+                                {p.paper && <small title="Оцінка за mark price мінус комісія входу, funding та очікувана комісія виходу">
+                                  Нетто ≈ {money(p.unrealizedPnl - p.entryFee - p.paper.fundingCost - p.paper.markPrice * p.quantity * p.paper.takerRate)}
+                                </small>}
                               </td>
+                              {!live && <td>
+                                {p.paper ? <>
+                                  isolated {p.paper.leverage}× · {money(p.paper.marginBalance ?? p.paper.initialMargin)} USDT
+                                  <small>Mark {price(p.paper.markPrice)} · Liq {p.paper.liquidationPrice > 0 ? price(p.paper.liquidationPrice) : "—"}</small>
+                                  <small>Вхід: {cost(p.entryFee)} · funding: {cost(p.paper.fundingCost)}</small>
+                                  <small>Тариф: {p.paper.feeSource === "manual" ? "ручний" : "API акаунта"} · {p.paper.takerRate * 100}%</small>
+                                  {p.paper.warnings.length > 0 && <small className="negative-text" title={paperWarningsText(p.paper.warnings)}>Є обмеження точності</small>}
+                                  {p.paper.closeFill && <small>Виконано в моделі; очікує звірки витрат</small>}
+                                </> : <small>Очікує оновлення моделі</small>}
+                              </td>}
                               <td>
                                 {p.expiresAt ? date(p.expiresAt) : "Вимкнено"}
                               </td>
@@ -1246,6 +1273,7 @@ export default function App() {
                             <th>Вхід</th>
                             <th>Вихід</th>
                             <th>Чистий P&L</th>
+                            <th>Витрати USDT</th>
                             <th>Причина</th>
                             <th>Відкрито</th>
                             <th>Закрито</th>
@@ -1290,6 +1318,15 @@ export default function App() {
                                 {!t.estimated && t.feesComplete === false ? (
                                   <small>Комісії неповні</small>
                                 ) : null}
+                              </td>
+                              <td>
+                                Комісії: {cost(t.fee)}
+                                <small>Funding: {t.fundingCost == null ? "Немає даних" : cost(t.fundingCost)}</small>
+                                {t.fundingComplete === false && <small className="negative-text">Funding очікує звірки</small>}
+                                {t.paper && <small title={paperWarningsText(t.paper.warnings)}>
+                                  {t.executionSource === "isolated-bankruptcy-model" ? "Ліквідація isolated (модель)" : "Стакан VWAP"}
+                                  {t.paper.warnings.length ? " · є зауваження" : ""}
+                                </small>}
                               </td>
                               <td>{t.reason}</td>
                               <td>{t.openedAt == null ? "—" : date(t.openedAt)}</td>

@@ -13,6 +13,7 @@ import { DEFAULT_SETTINGS, FORMATION_ANALYSIS_VERSION, validateSettings, type Se
 import { Store } from "../backend/store";
 import { Vault } from "../backend/security";
 import { Trading } from "../backend/trading";
+import { paperVenue } from "./paperFixture";
 import { TradingScheduleSettings } from "../src/components/TradingScheduleSettings";
 
 const MONDAY = Date.parse("2026-10-26T12:00:00Z");
@@ -118,7 +119,7 @@ function fixture(t: TestContext, mode: Mode = "paper", exchange: Exchange = "bin
   t.after(() => { store.close(); rmSync(directory, { recursive: true }); });
   store.set("settings", {
     ...DEFAULT_SETTINGS, mode, exchange, autoEntries: true, reverseEnabled: true,
-    entryCooldownSeconds: 0, tradingSchedule: schedule(window()),
+    entryCooldownSeconds: 0, paperLatencyMs: 0, tradingSchedule: schedule(window()),
   });
   const signal: Signal = {
     id: "scheduled-entry", exchange, symbol: "BTCUSDT", timeframe: "1m", formation: "Double Bottom",
@@ -146,6 +147,7 @@ function fixture(t: TestContext, mode: Mode = "paper", exchange: Exchange = "bin
     },
     protection: async (_intent: any, _quantity: number, saved: any) => { saved("stub-sl"); saved("stub-tp"); },
   };
+  paperVenue(market, broker, () => price);
   const trading = new Trading(store, market, vault, broker, true);
   const setNow = (at: string, freshSignal = true) => {
     now = Date.parse(at);

@@ -1,4 +1,5 @@
 import { Mutex } from "./store";
+import { validTiers, type RiskTier, type ExecutionBook, type ContractState, type FundingEvent } from "./paperModel";
 import {
   tfMs,
   type Exchange,
@@ -106,7 +107,7 @@ export class MarketData {
             m.marginAsset !== "USDT"
           )
             continue;
-          const lot = m.filters.find((x: any) => x.filterType === "LOT_SIZE");
+          const lot = m.filters.find((x: any) => x.filterType === "MARKET_LOT_SIZE") || m.filters.find((x: any) => x.filterType === "LOT_SIZE");
           const price = m.filters.find(
             (x: any) => x.filterType === "PRICE_FILTER",
           );
@@ -120,6 +121,7 @@ export class MarketData {
             minQuantity: Number(lot?.minQty),
             minNotional: Number(notional?.notional || 5),
             tickSize: Number(price?.tickSize),
+            maxQuantity: Number(lot?.maxQty),
           });
         }
       } else {
@@ -150,6 +152,7 @@ export class MarketData {
                 minQuantity: Number(m.lotSizeFilter.minOrderQty),
                 minNotional: Number(m.lotSizeFilter.minNotionalValue || 5),
                 tickSize: Number(m.priceFilter.tickSize),
+                maxQuantity: Number(m.lotSizeFilter.maxMktOrderQty),
               });
           cursor = data.result?.nextPageCursor || "";
           if (cursor && seen.has(cursor))
@@ -202,6 +205,72 @@ export class MarketData {
       this.prices.set(exchange, value);
       return value;
     });
+  }
+  async getExecutionBook(exchange: Exchange, symbol: string): Promise<ExecutionBook> {
+    const raw = exchange === "binance"
+      ? await this.request(exchange, "/fapi/v1/depth", { symbol, limit: 1000 })
+      : await this.request(exchange, "/v5/market/orderbook", { category: "linear", symbol, limit: 1000 });
+    const row = exchange === "binance" ? raw : raw.result;
+    return { at: Number(exchange === "binance" ? raw.T || raw.E : row.ts),
+      bids: (row.bids || row.b || []).map((x: any[]) => x.map(Number)),
+      asks: (row.asks || row.a || []).map((x: any[]) => x.map(Number)) };
+  }
+  async getContractState(exchange: Exchange, symbol: string): Promise<ContractState> {
+    if (exchange === "binance") {
+      const [mark, last] = await Promise.all([
+        this.request(exchange, "/fapi/v1/premiumIndex", { symbol }),
+        this.request(exchange, "/fapi/v2/ticker/price", { symbol }),
+      ]);
+      return { at: Number(mark.time), mark: Number(mark.markPrice), last: Number(last.price), nextFundingAt: Number(mark.nextFundingTime) };
+    }
+    const raw = await this.request(exchange, "/v5/market/tickers", { category: "linear", symbol });
+    const row = raw.result?.list?.find((x: any) => x.symbol === symbol);
+    if (!row) throw new Error("Немає параметрів контракту");
+    return { at: Number(raw.time), mark: Number(row.markPrice), last: Number(row.lastPrice), nextFundingAt: Number(row.nextFundingTime) };
+  }
+  async getPublicRiskTiers(symbol: string): Promise<RiskTier[]> {
+    const rows: any[] = []; let cursor = ""; const seen = new Set<string>();
+    do {
+      const raw = await this.request("bybit", "/v5/market/risk-limit", { category: "linear", symbol, ...(cursor ? { cursor } : {}) });
+      rows.push(...(raw.result?.list || []).filter((x: any) => x.symbol === symbol));
+      cursor = raw.result?.nextPageCursor || "";
+      if (cursor && seen.has(cursor)) throw new Error("Повторна сторінка рівнів ризику");
+      seen.add(cursor);
+      if (seen.size > 100) throw new Error("Забагато сторінок рівнів ризику");
+    } while (cursor);
+    return validTiers(rows.map(r => {
+      const normalized = Number(r.initialMargin) * Number(r.maxLeverage);
+      const scale = normalized > 2 ? 100 : 1;
+      if (Math.abs(normalized / scale - 1) > 0.05) throw new Error("Невідомі одиниці ставки маржі Bybit");
+      return { cap: Number(r.riskLimitValue), rate: Number(r.maintenanceMargin) / scale,
+        deduction: Number(r.mmDeduction || 0), maxLeverage: Number(r.maxLeverage) };
+    }));
+  }
+  async getFundingEvents(exchange: Exchange, symbol: string, from: number, to: number): Promise<FundingEvent[]> {
+    const events: FundingEvent[] = [];
+    // Bounded daily windows avoid the opposite pagination directions of the venues.
+    if (to - from > 32 * 86400_000) throw new Error("Потрібне поетапне відновлення funding");
+    for (let start = from; start <= to; start += 86400_000) {
+      const end = Math.min(to, start + 86400_000 - 1);
+      const raw = exchange === "binance"
+        ? await this.request(exchange, "/fapi/v1/fundingRate", { symbol, startTime: start, endTime: end, limit: 1000 })
+        : await this.request(exchange, "/v5/market/funding/history", { category: "linear", symbol, startTime: start, endTime: end, limit: 200 });
+      const rows = exchange === "binance" ? raw : raw.result?.list;
+      if (!Array.isArray(rows) || rows.length >= (exchange === "binance" ? 1000 : 200)) throw new Error("Історія funding неповна");
+      for (const row of rows) {
+        const at = Number(row.fundingTime || row.fundingRateTimestamp), rate = Number(row.fundingRate);
+        if (at < from || at > to) continue;
+        let price = Number(row.markPrice), priceSource = "settlement-mark";
+        if (exchange === "bybit") {
+          const candle = await this.request(exchange, "/v5/market/mark-price-kline", { category: "linear", symbol, interval: "1", start: at, end: at + 59999, limit: 1 });
+          const bar = candle.result?.list?.find((x: any[]) => Number(x[0]) === at);
+          price = Number(bar?.[1]); priceSource = "mark-kline-open-estimate";
+        }
+        if (!Number.isFinite(at) || !Number.isFinite(rate) || !Number.isFinite(price) || price <= 0) throw new Error("Некоректне нарахування funding");
+        events.push({ at, rate, price, priceSource });
+      }
+    }
+    return [...new Map(events.map(e => [e.at, e])).values()].sort((a, b) => a.at - b.at);
   }
   async getCandles(
     exchange: Exchange,

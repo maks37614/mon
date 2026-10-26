@@ -14,6 +14,8 @@ import { formationIsVisible, signalAllowsEntry } from "./formationState";
 import { tradingScheduleState } from "./tradingSchedule";
 import type { MarketData } from "./market";
 import type { Vault } from "./security";
+import { depthFill, liquidationPrice, liquidatable, validTiers, type PaperState } from "./paperModel";
+import { PaperFeed, type PriceTick } from "./paperFeed";
 import {
   ExchangeGateway,
   definitiveRejection,
@@ -43,6 +45,7 @@ export type Position = {
   guards: string[];
   status: "active" | "protecting" | "closing" | "reconciling";
   unrealizedPnl: number;
+  paper?: PaperState;
 };
 type Book = {
   balance: number;
@@ -74,6 +77,17 @@ export class Trading {
   private mutex = new Mutex();
   private timer: ReturnType<typeof setInterval> | null = null;
   private monitoring = false;
+  private running = false;
+  private lastLiveCycle = 0;
+  private paperGaps = new Set<string>();
+  private paperErrorLog = new Map<string, number>();
+  private paperWatched = new Map<string, Position>();
+  private paperTicks = new Map<string, PriceTick & { lastAt?: number; markAt?: number; trigger?: PaperState["closeTrigger"] }>();
+  private feed = new PaperFeed((exchange, symbol, tick) => this.paperTick(exchange, symbol, tick),
+    (exchange, symbol) => {
+      this.store.log("WARN", `${exchange} ${symbol}: розрив потоку симуляції; точність спостереження знижена`);
+      this.paperGaps.add(`${exchange}:${symbol}`);
+    });
   constructor(
     private store: Store,
     private market: MarketData,
@@ -199,12 +213,16 @@ export class Trading {
     };
   }
   start() {
+    this.running = true;
+    this.syncPaperFeed();
     this.timer = setInterval(() => {
       void this.monitor();
-    }, 5000);
+    }, 1000);
     void this.monitor();
   }
   async stop() {
+    this.running = false;
+    this.feed.stop();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     await this.mutex.run(async () => {});
@@ -217,34 +235,38 @@ export class Trading {
         try {
           const s = this.settings(),
             b = this.book(s.mode);
+          if (this.running && s.mode === "live" && Date.now() - this.lastLiveCycle < 5000) return;
+          if (s.mode === "live") this.lastLiveCycle = Date.now();
           if (
             s.mode === "live" &&
             (b.positions.length || b.pending.length || s.autoEntries)
           )
             await this.reconcileLive(b, s);
+          if (s.mode === "live") {
+            for (const trade of b.history.filter(t => t.fundingComplete === false && Date.now() - t.closedAt >= 60000 && Date.now() - (t.fundingCheckedAt || 0) >= 60000).slice(0, 3)) {
+              trade.fundingCheckedAt = Date.now();
+              try {
+                trade.fundingCost = await this.gateway.fundingCost(trade.exchange, trade.symbol, trade.openedAt!, trade.closedAt);
+                trade.fundingComplete = true;
+                trade.netPnl = trade.grossPnl - trade.fee - trade.fundingCost;
+              } catch { /* Keep the missing cost explicit and retry later. */ }
+            }
+            this.save("live", b);
+          }
           if (s.mode === "paper" && b.positions.length) {
-            const quotes = await this.market.getPrices(s.exchange);
             for (const p of [...b.positions]) {
-              const price = quotes.data[p.symbol];
-              if (!price) continue;
-              p.currentPrice = price;
-              p.unrealizedPnl =
-                (p.direction === "LONG" ? 1 : -1) *
-                (price - p.entryPrice) *
-                p.quantity;
-              const tp =
-                p.direction === "LONG"
-                  ? price >= p.takeProfit
-                  : price <= p.takeProfit;
-              const sl =
-                p.direction === "LONG"
-                  ? price <= p.stopLoss
-                  : price >= p.stopLoss;
-              if (tp || sl || (p.expiresAt > 0 && Date.now() >= p.expiresAt))
-                this.finishPaper(b, p, price, tp ? "TP" : sl ? "SL" : "TIME");
+              try { await this.monitorPaper(b, p); }
+              catch (e: any) {
+                if (p.paper && !p.paper.warnings.includes("data-unavailable")) p.paper.warnings.push("data-unavailable");
+                if (Date.now() - (this.paperErrorLog.get(p.id) || 0) >= 60000) {
+                  this.paperErrorLog.set(p.id, Date.now());
+                  this.store.log("WARN", `${p.symbol}: симуляція очікує дані — ${String(e.message).slice(0, 180)}`);
+                }
+              }
             }
             this.save("paper", b);
           }
+          this.syncPaperFeed();
           if (
             s.autoEntries &&
             tradingScheduleState(s.tradingSchedule).allowed &&
@@ -356,9 +378,10 @@ export class Trading {
         : "LONG"
       : signal.direction;
     const sign = direction === "LONG" ? 1 : -1;
-    const stopLoss = price * (1 - (sign * s.stopLossPercent) / 100),
+    let stopLoss = price * (1 - (sign * s.stopLossPercent) / 100),
       takeProfit = price * (1 + (sign * s.takeProfitPercent) / 100);
     let quantity: number;
+    let paper: PaperState | undefined, executionPrice = price;
     if (s.mode === "paper") {
       const market = (await this.market.getMarkets(s.exchange)).find(
         (m) => m.symbol === signal.symbol,
@@ -371,16 +394,37 @@ export class Trading {
           ) * market.quantityStep
         ).toPrecision(12),
       );
+      paper = await this.newPaperState(s, signal.symbol, price, quantity);
+      if (paper.latencyMs) await new Promise(resolve => setTimeout(resolve, paper!.latencyMs));
+      const book = await this.market.getExecutionBook(s.exchange, signal.symbol);
+      executionPrice = depthFill(book, direction === "LONG" ? "buy" : "sell", quantity);
+      if (quantity * executionPrice > s.orderNotionalUsdt) {
+        quantity = Number((Math.floor(s.orderNotionalUsdt / executionPrice / market.quantityStep + 1e-10) * market.quantityStep).toPrecision(12));
+        executionPrice = depthFill(book, direction === "LONG" ? "buy" : "sell", quantity);
+      }
+      if (Math.abs(executionPrice - signal.entryPrice) / signal.entryPrice * 100 > s.slippageTolerancePercent)
+        throw new Error("Ціна виконання зі стакана перевищує допустиме відхилення");
+      const tier = paper.tiers.find(t => quantity * executionPrice <= t.cap);
+      if (!tier || s.leverage > tier.maxLeverage || quantity * executionPrice > s.orderNotionalUsdt * 1.000001 ||
+        (market.maxQuantity && quantity > market.maxQuantity)) throw new Error("Обсяг або плече перевищують біржовий ліміт");
+      paper.closeFeeReserve = s.exchange === "bybit" ? executionPrice * quantity * (1 - sign / s.leverage) * paper.takerRate : 0;
+      paper.initialMargin = executionPrice * quantity / s.leverage + paper.closeFeeReserve;
+      paper.marginBalance = paper.initialMargin;
+      if (Math.abs(Date.now() - paper.nextFundingAt) <= 5000) paper.warnings.push("funding-boundary-estimate");
+      paper.entrySlippage = (executionPrice - price) * quantity * sign;
+      paper.liquidationPrice = liquidationPrice({ direction, entryPrice: executionPrice, quantity }, paper);
+      if (liquidatable({ direction, entryPrice: executionPrice, quantity }, paper, paper.markPrice)) throw new Error("Маржа недостатня вже при відкритті");
+      stopLoss = executionPrice * (1 - sign * s.stopLossPercent / 100);
+      takeProfit = executionPrice * (1 + sign * s.takeProfitPercent / 100);
       const reserved = b.positions.reduce(
-        (sum, p) => sum + (p.entryPrice * p.quantity) / s.leverage,
+        (sum, p) => sum + (p.paper ? Math.max(0, p.paper.marginBalance ?? p.paper.initialMargin - p.paper.fundingCost) : (p.entryPrice * p.quantity) / s.leverage),
         0,
       );
       if (
         quantity < market.minQuantity ||
-        quantity * price < market.minNotional ||
+        quantity * executionPrice < market.minNotional ||
         b.balance - reserved <
-          (quantity * price) / s.leverage +
-            (quantity * price * s.takerFeePercent) / 100
+          paper.initialMargin + quantity * executionPrice * paper.takerRate
       )
         throw new Error(
           "Недостатньо віртуальної маржі або сума менша за мінімум біржі",
@@ -407,6 +451,7 @@ export class Trading {
       await this.gateway.prepare(s.exchange, signal.symbol, s.leverage);
     }
     // Quotes, account reads and exchange preparation may span the session boundary.
+    if (Date.now() - signal.candleAt > s.maxSignalAgeSeconds * 1000) throw new Error("Сигнал застарів під час підготовки виконання");
     if (automatic && !tradingScheduleState(s.tradingSchedule).allowed)
       throw new Error("Торгова сесія завершилася під час підготовки входу");
     const intent: Intent = {
@@ -429,26 +474,27 @@ export class Trading {
         .slice(-10_000),
     );
     if (s.mode === "paper") {
-      const fee = (price * quantity * s.takerFeePercent) / 100;
+      const fee = executionPrice * quantity * paper!.takerRate;
       b.balance -= fee;
-      b.positions.push(
-        this.position(
+      const position = this.position(
           intent,
           {
             id: "paper",
             filled: quantity,
-            average: price,
+            average: executionPrice,
             fee,
             status: "closed",
           },
           s,
           "active",
-        ),
-      );
+        );
+      position.paper = paper;
+      b.positions.push(position);
       this.save("paper", b);
+      this.syncPaperFeed();
       this.store.log(
         "TRADE",
-        `Віртуальний вхід ${signal.symbol} ${direction}, ціна ${price}`,
+        `Віртуальний вхід ${signal.symbol} ${direction}: стакан ${executionPrice}, taker ${paper!.takerRate * 100}%, isolated ${paper!.initialMargin} USDT`,
       );
       return;
     }
@@ -551,21 +597,171 @@ export class Trading {
         p = b.positions.find((x) => x.id === id);
       if (!p) throw new Error("Позицію не знайдено");
       if (s.mode === "paper") {
-        const quotes = await this.market.getPrices(s.exchange);
-        const price = quotes.data[p.symbol];
-        if (!price) throw new Error("Немає поточної ціни");
-        this.finishPaper(b, p, price, "MANUAL");
-        this.save("paper", b);
+        try { await this.ensurePaper(p); await this.finishPaper(b, p, p.currentPrice, "MANUAL"); }
+        finally { this.save("paper", b); this.syncPaperFeed(); }
       } else await this.closeLive(b, p, "MANUAL", s);
     });
   }
-  private finishPaper(b: Book, p: Position, price: number, reason: string) {
+  private syncPaperFeed() {
+    const positions = this.book("paper").positions;
+    this.paperWatched = new Map(positions.map(p => [`${p.exchange}:${p.symbol}`, p]));
+    if (this.running) this.feed.sync(positions);
+    const ids = new Set(this.paperWatched.keys());
+    for (const key of this.paperTicks.keys()) if (!ids.has(key)) this.paperTicks.delete(key);
+    const positionIds = new Set(positions.map(p => p.id));
+    for (const id of this.paperErrorLog.keys()) if (!positionIds.has(id)) this.paperErrorLog.delete(id);
+  }
+  private paperTick(exchange: Exchange, symbol: string, tick: PriceTick) {
+    const key = `${exchange}:${symbol}`, previous = this.paperTicks.get(key);
+    if (tick.last !== undefined && tick.at < (previous?.lastAt || 0)) tick = { ...tick, last: undefined };
+    if (tick.mark !== undefined && tick.at < (previous?.markAt || 0)) tick = { ...tick, mark: undefined };
+    tick = { at: tick.at, ...(tick.last !== undefined ? { last: tick.last } : {}), ...(tick.mark !== undefined ? { mark: tick.mark } : {}) };
+    const current = { ...previous, ...tick,
+      lastAt: tick.last !== undefined ? tick.at : previous?.lastAt,
+      markAt: tick.mark !== undefined ? tick.at : previous?.markAt };
+    const p = this.paperWatched.get(key);
+    if (p?.paper && !current.trigger) {
+      try {
+        if (tick.mark !== undefined && liquidatable(p, p.paper, tick.mark)) current.trigger = { reason: "LIQUIDATION", at: tick.at, reference: tick.mark };
+        else if (tick.last !== undefined) {
+          const reason = p.direction === "LONG"
+            ? tick.last <= p.stopLoss ? "SL" : tick.last >= p.takeProfit ? "TP" : ""
+            : tick.last >= p.stopLoss ? "SL" : tick.last <= p.takeProfit ? "TP" : "";
+          if (reason) current.trigger = { reason, at: tick.at, reference: tick.last };
+        }
+      } catch { this.paperGaps.add(key); }
+    }
+    this.paperTicks.set(key, current);
+    if (current.trigger) void this.monitor();
+  }
+  private async newPaperState(s: Settings, symbol: string, reference: number, quantity: number): Promise<PaperState> {
+    const fee = s.paperFeeMode === "manual" ? { rate: s.takerFeePercent / 100, at: Date.now(), source: "manual" } : await this.gateway.takerRate(s.exchange, symbol);
+    const [tiers, state] = await Promise.all([
+      s.exchange === "binance" ? this.gateway.riskTiers(symbol) : this.market.getPublicRiskTiers(symbol),
+      this.market.getContractState(s.exchange, symbol),
+    ]);
+    this.checkContractState(state);
+    if (!Number.isFinite(fee.rate) || fee.rate < 0 || fee.rate > 0.01) throw new Error("Немає коректної комісії");
+    return { version: 1, marginMode: "isolated", leverage: s.leverage, initialMargin: reference * quantity / s.leverage,
+      marginBalance: reference * quantity / s.leverage,
+      takerRate: fee.rate, feeSource: fee.source, feeAt: fee.at, latencyMs: s.paperLatencyMs,
+      tiers: validTiers(tiers), riskAt: Date.now(), entryReference: reference, entrySlippage: 0,
+      markPrice: state.mark, liquidationPrice: 0, nextFundingAt: state.nextFundingAt,
+      fundingCost: 0, fundingEvents: [], fundingCheckedAt: Date.now() - 1,
+      lastObservedAt: Date.now(), lastMarkAt: state.at, lastTradeAt: state.at, warnings: [] };
+  }
+  private checkContractState(state: { at: number; mark: number; last: number; nextFundingAt: number }) {
+    if (!Number.isFinite(state.at) || Math.abs(Date.now() - state.at) > 5000 ||
+      !Number.isFinite(state.mark) || state.mark <= 0 || !Number.isFinite(state.last) || state.last <= 0 ||
+      !Number.isSafeInteger(state.nextFundingAt) || state.nextFundingAt < Date.now() - 60000)
+      throw new Error("Немає свіжих mark price та параметрів funding");
+  }
+  private async ensurePaper(p: Position) {
+    if (p.paper) return;
+    p.paper = await this.newPaperState({ ...this.settings(), exchange: p.exchange }, p.symbol, p.entryPrice, p.quantity);
+    p.paper.fundingCheckedAt = p.openedAt - 1;
+    p.paper.warnings.push("legacy-entry-not-reconstructed");
+  }
+  private async settlePaperFunding(b: Book, p: Position, until: number) {
+    const state = p.paper!;
+    if (until <= state.fundingCheckedAt) return;
+    const backfill = state.warnings.includes("legacy-entry-not-reconstructed") && state.fundingCheckedAt < p.openedAt;
+    if (!backfill && until < state.nextFundingAt) { state.fundingCheckedAt = until; return; }
+    const from = Math.max(p.openedAt, state.fundingCheckedAt + 1), end = Math.min(until, from + 31 * 86400_000);
+    const events = await this.market.getFundingEvents(p.exchange, p.symbol, from, end);
+    if (state.nextFundingAt >= from && state.nextFundingAt <= end && !events.some(e => e.at === state.nextFundingAt))
+      throw new Error("Нарахування funding ще не опубліковане; результат очікує звірки");
+    for (const e of events) {
+      if (e.at < from || e.at > end || state.fundingEvents.some(x => x.at === e.at)) continue;
+      const cost = e.rate * e.price * p.quantity * (p.direction === "LONG" ? 1 : -1);
+      if (!Number.isFinite(cost)) throw new Error("Некоректна сума funding");
+      const reserved = b.positions.reduce((sum, pos) => sum + (pos.paper?.marginBalance ?? pos.entryPrice * pos.quantity / this.settings().leverage), 0);
+      const available = Math.max(0, b.balance - reserved);
+      state.marginBalance = Math.max(0, (state.marginBalance ?? state.initialMargin) - Math.max(0, cost - available));
+      state.fundingEvents.push({ ...e, cost }); state.fundingCost += cost; b.balance -= cost;
+      if (e.priceSource !== "settlement-mark" && !state.warnings.includes("funding-mark-estimate")) state.warnings.push("funding-mark-estimate");
+    }
+    state.fundingCheckedAt = end;
+    const current = await this.market.getContractState(p.exchange, p.symbol);
+    this.checkContractState(current);
+    state.nextFundingAt = current.nextFundingAt;
+    this.save("paper", b);
+    if (end < until) throw new Error("Відновлюється історія funding; наступний пакет у наступному циклі");
+  }
+  private async monitorPaper(b: Book, p: Position) {
+    await this.ensurePaper(p);
+    const state = p.paper!, key = `${p.exchange}:${p.symbol}`, tick = this.paperTicks.get(key);
+    if (state.closeFill) { await this.finishPaper(b, p, state.closeFill.reference, state.closeFill.reason); return; }
+    if (Date.now() - state.lastObservedAt > 15000 && !state.warnings.includes("monitoring-gap")) state.warnings.push("monitoring-gap");
+    if (this.paperGaps.delete(key) && !state.warnings.includes("stream-gap")) state.warnings.push("stream-gap");
+    let last = tick?.last, mark = tick?.mark;
+    if (!this.running || !last || !mark || Date.now() - (tick?.markAt || 0) > 5000 || Date.now() - (tick?.lastAt || 0) > 15000) {
+      const current = await this.market.getContractState(p.exchange, p.symbol); this.checkContractState(current);
+      last = current.last; mark = current.mark;
+      state.nextFundingAt = Math.min(state.nextFundingAt, current.nextFundingAt);
+      state.lastMarkAt = state.lastTradeAt = current.at;
+      const arrived = this.paperTicks.get(key);
+      if (arrived?.last !== undefined && (arrived.lastAt || 0) > current.at) last = arrived.last;
+      if (arrived?.mark !== undefined && (arrived.markAt || 0) > current.at) mark = arrived.mark;
+      this.paperTicks.set(key, { ...arrived, at: Math.max(current.at, arrived?.at || 0), last, mark,
+        lastAt: Math.max(current.at, arrived?.lastAt || 0), markAt: Math.max(current.at, arrived?.markAt || 0) });
+    } else { state.lastMarkAt = tick.markAt; state.lastTradeAt = tick.lastAt; }
+    state.markPrice = mark; state.lastObservedAt = Date.now(); p.currentPrice = last;
+    if (Date.now() - state.riskAt > 600_000) {
+      try {
+        state.tiers = validTiers(await (p.exchange === "binance" ? this.gateway.riskTiers(p.symbol) : this.market.getPublicRiskTiers(p.symbol)));
+        state.riskAt = Date.now();
+      } catch { if (!state.warnings.includes("risk-snapshot-stale")) state.warnings.push("risk-snapshot-stale"); }
+    }
+    p.unrealizedPnl = (mark - p.entryPrice) * p.quantity * (p.direction === "LONG" ? 1 : -1);
+    const tp = p.direction === "LONG" ? last >= p.takeProfit : last <= p.takeProfit;
+    const sl = p.direction === "LONG" ? last <= p.stopLoss : last >= p.stopLoss;
+    state.closeTrigger ||= this.paperTicks.get(key)?.trigger;
+    if (!state.closeTrigger && liquidatable(p, state, mark)) state.closeTrigger = { reason: "LIQUIDATION", at: Date.now(), reference: mark };
+    if (!state.closeTrigger && (tp || sl || (p.expiresAt > 0 && Date.now() >= p.expiresAt)))
+      state.closeTrigger = { reason: tp ? "TP" : sl ? "SL" : "TIME", at: Date.now(), reference: last };
+    if (state.closeTrigger) { this.save("paper", b); await this.finishPaper(b, p, state.closeTrigger.reference, state.closeTrigger.reason); return; }
+    await this.settlePaperFunding(b, p, Date.now());
+    state.liquidationPrice = liquidationPrice(p, state);
+    if (liquidatable(p, state, mark)) await this.finishPaper(b, p, mark, "LIQUIDATION");
+  }
+  private async finishPaper(b: Book, p: Position, reference: number, reason: string) {
+    const state = p.paper!;
+    state.closeTrigger ||= { reason, at: Date.now(), reference };
+    reason = state.closeTrigger.reason; reference = state.closeTrigger.reference;
+    if (!state.closeFill) {
+      if (state.latencyMs) await new Promise(resolve => setTimeout(resolve, state.latencyMs));
+      let price: number;
+      if (reason === "LIQUIDATION") {
+        await this.settlePaperFunding(b, p, Date.now());
+        price = p.entryPrice - (p.direction === "LONG" ? 1 : -1) * Math.max(0, state.marginBalance ?? state.initialMargin - state.fundingCost) / p.quantity;
+      } else {
+        const book = await this.market.getExecutionBook(p.exchange, p.symbol);
+        price = depthFill(book, p.direction === "LONG" ? "sell" : "buy", p.originalQuantity);
+      }
+      state.closeFill = { price, at: Date.now(), reference, reason,
+        slippage: reason === "LIQUIDATION" ? 0 : (reference - price) * p.quantity * (p.direction === "LONG" ? 1 : -1) };
+      if (Math.abs(state.closeFill.at - state.nextFundingAt) <= 5000 && !state.warnings.includes("funding-boundary-estimate")) state.warnings.push("funding-boundary-estimate");
+      p.status = "closing"; this.save("paper", b);
+      p.currentPrice = price;
+      p.unrealizedPnl = (price - p.entryPrice) * p.quantity * (p.direction === "LONG" ? 1 : -1);
+      this.save("paper", b);
+    }
+    const fill = state.closeFill;
+    if (fill.takerRate === undefined && fill.reason !== "LIQUIDATION") {
+      const fee = state.feeSource === "manual" ? { rate: state.takerRate, source: "manual", at: state.feeAt }
+        : await this.gateway.takerRate(p.exchange, p.symbol, true);
+      if (!Number.isFinite(fee.rate) || fee.rate < 0 || fee.rate > 0.01) throw new Error("Немає коректного тарифу закриття");
+      fill.takerRate = fee.rate; fill.feeSource = fee.source; fill.feeAt = fee.at;
+      this.save("paper", b);
+    }
+    await this.settlePaperFunding(b, p, fill.at);
+    const price = fill.price;
     const gross =
       (price - p.entryPrice) *
       p.originalQuantity *
       (p.direction === "LONG" ? 1 : -1);
-    const exitFee =
-      (price * p.originalQuantity * this.settings().takerFeePercent) / 100;
+    const exitFee = fill.reason === "LIQUIDATION" ? 0 : price * p.originalQuantity * fill.takerRate!;
     b.balance += gross - exitFee;
     b.history.unshift({
       id: p.id,
@@ -584,11 +780,15 @@ export class Trading {
       quantity: p.originalQuantity,
       grossPnl: gross,
       fee: p.entryFee + exitFee,
-      netPnl: gross - p.entryFee - exitFee,
+      netPnl: gross - p.entryFee - exitFee - state.fundingCost,
       openedAt: p.openedAt,
-      closedAt: Date.now(),
-      reason,
+      closedAt: fill.at,
+      reason: fill.reason,
       estimated: true,
+      entryFee: p.entryFee, exitFee, fundingCost: state.fundingCost, fundingComplete: true,
+      entrySlippage: state.entrySlippage, exitSlippage: fill.slippage,
+      executionSource: fill.reason === "LIQUIDATION" ? "isolated-bankruptcy-model" : "orderbook-vwap",
+      paper: state,
     });
     b.history = b.history.slice(0, 1000);
     b.positions = b.positions.filter((x) => x.id !== p.id);
@@ -681,6 +881,9 @@ export class Trading {
     const gross =
         (exit - p.entryPrice) * total * (p.direction === "LONG" ? 1 : -1),
       fee = entryFee + unique.reduce((sum, t) => sum + t.fee, 0);
+    const closedAt = Math.max(...unique.map(t => t.at));
+    let fundingCost: number | undefined;
+    try { fundingCost = await this.gateway.fundingCost(p.exchange, p.symbol, p.openedAt, closedAt); } catch { /* Never report unavailable funding as a verified zero. */ }
     b.history.unshift({
       id: p.id,
       exchange: p.exchange,
@@ -698,9 +901,12 @@ export class Trading {
       quantity: total,
       grossPnl: gross,
       fee,
-      netPnl: gross - fee,
+      netPnl: gross - fee - (fundingCost || 0),
+      entryFee, exitFee: fee - entryFee, fundingCost,
+      fundingComplete: fundingCost !== undefined && Date.now() - closedAt >= 60000,
+      fundingCheckedAt: Date.now(), executionSource: "venue-fills",
       openedAt: p.openedAt,
-      closedAt: Math.max(...unique.map((t) => t.at)),
+      closedAt,
       reason,
       estimated: false,
       feesComplete:

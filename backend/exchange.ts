@@ -1,5 +1,6 @@
 import type { Exchange, Signal, Settings } from "./config";
 import type { Vault } from "./security";
+import { validTiers, type RiskTier } from "./paperModel";
 
 export const exchangeError = (error: any) =>
   `Біржа: ${String(error?.name || "ExchangeError")
@@ -43,12 +44,72 @@ export type Intent = {
 
 export class ExchangeGateway {
   private clients = new Map<Exchange, Promise<any>>();
+  private paperCache = new Map<string, { at: number; value: any }>();
   constructor(
     private vault: Vault,
     private factory?: (exchange: Exchange, credentials: any) => Promise<any>,
   ) {}
   invalidate(exchange: Exchange) {
     this.clients.delete(exchange);
+    for (const key of this.paperCache.keys()) if (key.startsWith(exchange + ":")) this.paperCache.delete(key);
+  }
+  private async paperRead<T>(work: () => Promise<T>): Promise<T> {
+    try { return await work(); } catch (error) { throw new Error(exchangeError(error)); }
+  }
+  async takerRate(exchange: Exchange, symbolId: string, refresh = false): Promise<{ rate: number; at: number; source: string }> {
+    const key = `${exchange}:fee:${symbolId}`, cached = this.paperCache.get(key);
+    if (!refresh && cached && Date.now() - cached.at < 600_000) return cached.value;
+    if (!this.vault.status(exchange).configured) throw new Error("Для автоматичної комісії збережіть API-ключ із правами читання або оберіть ручний тариф");
+    const c = await this.paperRead(() => this.client(exchange)), symbol = this.symbol(c, symbolId);
+    const raw = await this.paperRead<any>(() => c.fetchTradingFee(symbol)), rate = Number(raw.taker);
+    if (!Number.isFinite(rate) || rate < 0 || rate > 0.01) throw new Error("Біржа не повернула коректний taker-тариф");
+    const value = { rate, at: Date.now(), source: "account-api" };
+    this.paperCache.set(key, { at: value.at, value }); return value;
+  }
+  async riskTiers(symbolId: string): Promise<RiskTier[]> {
+    const key = `binance:risk:${symbolId}`, cached = this.paperCache.get(key);
+    if (cached && Date.now() - cached.at < 600_000) return cached.value;
+    if (!this.vault.status("binance").configured) throw new Error("Binance потребує API-ключ читання для біржових рівнів маржі симулятора");
+    const c = await this.paperRead(() => this.client("binance"));
+    const raw = await this.paperRead<any>(() => c.fapiPrivateGetLeverageBracket({ symbol: symbolId }));
+    const row = Array.isArray(raw) ? raw.find((r: any) => r.symbol === symbolId) : raw;
+    const coefficient = Number(row?.notionalCoef || 1);
+    if (!(coefficient > 0)) throw new Error("Некоректний коефіцієнт рівнів маржі");
+    const value = validTiers((row?.brackets || []).map((r: any) => ({
+      cap: Number(r.notionalCap) * coefficient, rate: Number(r.maintMarginRatio),
+      deduction: Number(r.cum) * coefficient, maxLeverage: Number(r.initialLeverage),
+    })));
+    this.paperCache.set(key, { at: Date.now(), value }); return value;
+  }
+  async fundingCost(exchange: Exchange, symbolId: string, from: number, to: number): Promise<number> {
+    if (to - from > 90 * 86400_000) throw new Error("Історія funding потребує окремого архіву");
+    const c = await this.paperRead(() => this.client(exchange)), seen = new Set<string>(); let cost = 0;
+    for (let start = from; start <= to; start += 7 * 86400_000) {
+      const end = Math.min(to, start + 7 * 86400_000 - 1);
+      let cursor = ""; const cursors = new Set<string>();
+      do {
+        const raw = await this.paperRead<any>(async () => exchange === "binance"
+          ? await c.fapiPrivateGetIncome({ symbol: symbolId, incomeType: "FUNDING_FEE", startTime: start, endTime: end, limit: 1000 })
+          : await c.privateGetV5ExecutionList({ category: "linear", symbol: symbolId, execType: "Funding", startTime: start, endTime: end, limit: 100, ...(cursor ? { cursor } : {}) }));
+        const rows = exchange === "binance" ? raw : raw.result?.list;
+        if (!Array.isArray(rows) || (exchange === "binance" && rows.length >= 1000)) throw new Error("Історія funding неповна");
+        for (const row of rows) {
+          const at = Number(exchange === "binance" ? row.time : row.execTime);
+          if (at < from || at > to || row.symbol !== symbolId) continue;
+          const id = String(exchange === "binance" ? row.tranId : row.execId);
+          const value = Number(exchange === "binance" ? row.income : row.execFee);
+          if (!id || id === "undefined" || !Number.isFinite(at) || !Number.isFinite(value) ||
+            (exchange === "binance" && row.asset !== "USDT")) throw new Error("Некоректне біржове нарахування funding");
+          if (seen.has(id)) continue;
+          seen.add(id); cost += exchange === "binance" ? -value : value;
+        }
+        cursor = exchange === "bybit" ? raw.result?.nextPageCursor || "" : "";
+        if (cursor && cursors.has(cursor)) throw new Error("Повторний курсор funding");
+        cursors.add(cursor);
+        if (cursors.size > 100) throw new Error("Забагато сторінок funding");
+      } while (cursor);
+    }
+    return cost;
   }
   private async client(exchange: Exchange) {
     if (this.clients.has(exchange)) return this.clients.get(exchange)!;
