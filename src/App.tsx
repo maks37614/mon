@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   BarChart3,
@@ -665,15 +665,21 @@ export default function App() {
     [tab, setTab] = useState("overview");
   const [message, setMessage] = useState(""),
     [error, setError] = useState(""),
+    [refreshError, setRefreshError] = useState(""),
     [busy, setBusy] = useState(false),
     [query, setQuery] = useState(""),
     [chart, setChart] = useState<ChartSelection | null>(null);
+  const refreshSequence = useRef(0);
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     try {
       const next = await api<Snapshot>("/api/state");
+      if (sequence !== refreshSequence.current) return;
       setData(next);
       setAuthenticated(true);
+      setRefreshError("");
     } catch (e: any) {
+      if (sequence !== refreshSequence.current) return;
       if (e.status === 401) {
         setAuthenticated(false);
         setData(null);
@@ -698,7 +704,7 @@ export default function App() {
     if (!authenticated) return;
     const timer = setInterval(() => {
       if (document.visibilityState === "visible")
-        void refresh().catch((e) => setError(e.message));
+        void refresh().catch((e) => setRefreshError(e.message));
     }, 5000);
     return () => clearInterval(timer);
   }, [authenticated, refresh]);
@@ -939,13 +945,13 @@ export default function App() {
               {scan.running ? "Скануємо…" : "Сканувати пакет"}
             </button>
           </div>
-          {error && (
+          {(error || refreshError) && (
             <div role="alert" className="notice error">
-              {error}
+              {error || refreshError}
               <button
                 className="icon-button"
                 aria-label="Закрити помилку"
-                onClick={() => setError("")}
+                onClick={() => { setError(""); setRefreshError(""); }}
               >
                 <X size={15} />
               </button>
