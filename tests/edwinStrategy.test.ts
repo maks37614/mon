@@ -12,7 +12,7 @@ const candles = (count: number, interval: number, close: number): Candle[] =>
 
 test("Edwin strategy is disabled until explicitly enabled", () => {
   assert.equal(EDWIN_DEFAULTS.enabled, false);
-  assert.equal(EDWIN_STRATEGY.id, "edwin-breakouts-v1");
+  assert.equal(EDWIN_STRATEGY.id, "ev-test-v1");
 });
 
 test("Edwin settings validate and reject unknown or excessive risk settings", () => {
