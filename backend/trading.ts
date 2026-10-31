@@ -12,7 +12,7 @@ import {
 import { Mutex, type Store } from "./store";
 import { formationIsVisible, signalAllowsEntry } from "./formationState";
 import { EV_TEST_ID, selectEvTestCandidates } from "./evTestRouting";
-import type { EdwinSignal } from "./edwinStrategy";
+import { EDWIN_DEFAULTS, type EdwinSettings, type EdwinSignal } from "./edwinStrategy";
 import { tradingScheduleState } from "./tradingSchedule";
 import type { MarketData } from "./market";
 import type { Vault } from "./security";
@@ -103,6 +103,9 @@ export class Trading {
   }
   private evTestEnabled() {
     return this.store.get<{ enabled?: boolean }>("builder:edwin:config", {}).enabled === true;
+  }
+  private evTestRiskSettings(): EdwinSettings {
+    return { ...EDWIN_DEFAULTS, ...this.store.get<Partial<EdwinSettings>>("builder:edwin:config", {}) };
   }
   private evTestCandidates(settings: Settings) {
     return selectEvTestCandidates(
@@ -353,6 +356,18 @@ export class Trading {
     if (isEvTest !== this.evTestEnabled()) throw new Error("Стратегія перемкнулася; сигнал більше не активний");
     if (isEvTest && !this.evTestCandidates(s).some((candidate) => candidate.id === signal.id))
       throw new Error("Ev-Test: сигнал зник з актуального списку формацій або застарів");
+    if (isEvTest) {
+      const risk = this.evTestRiskSettings();
+      const today = (at: number) => new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Europe/Warsaw", year: "numeric", month: "2-digit", day: "2-digit",
+      }).format(at);
+      const day = today(now);
+      const netToday = b.history.filter((trade) => today(trade.closedAt) === day)
+        .reduce((sum, trade) => sum + trade.netPnl, 0);
+      const baseline = b.startBalance > 0 ? b.startBalance : b.balance;
+      if (!(baseline > 0) || netToday <= -(baseline * risk.maxDailyLossPercent / 100))
+        throw new Error("Ev-Test: денний ліміт збитків досягнуто або баланс невідомий");
+    }
     if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !Number.isInteger(signal.confidence) ||
       signal.confidence < 0 || signal.confidence > 100)
       throw new Error("Сигнал потребує нового сканування та оцінювання");
@@ -576,9 +591,9 @@ export class Trading {
       stopLoss: intent.stopLoss,
       takeProfit: intent.takeProfit,
       openedAt,
-      expiresAt: s.maxHoldingSeconds
-        ? openedAt + s.maxHoldingSeconds * 1000
-        : 0,
+      expiresAt: intent.signal.strategyId === EV_TEST_ID
+        ? openedAt + this.evTestRiskSettings().maxHoldMinutes * 60_000
+        : (s.maxHoldingSeconds ? openedAt + s.maxHoldingSeconds * 1000 : 0),
       entryFee: fill.fee,
       entryOrderId: fill.id,
       intent,
