@@ -32,6 +32,7 @@ import "./dashboard.css";
 
 type Snapshot = {
   settings: Settings;
+  evTestEnabled?: boolean;
   entrySchedule: TradingScheduleState;
   positions: any[];
   history: TradeHistoryEntry[];
@@ -1007,6 +1008,9 @@ export default function App() {
                 Ліміт API {exchange}: запити призупинено до {date(at)}.
               </div>
             ))}
+          {tab === "screener" && data.evTestEnabled && (
+            <div className="notice">Ev-Test активна: ці формації надалі відбирають монети, але старі точки входу вимкнені. Нові точки знаходяться у Конструкторі стратегій.</div>
+          )}
           {tab === "builder" ? (
             <StrategyBuilder onOpenChart={(signal) => openChart({ ...signal, formation: signal.pattern })} />
           ) : tab === "settings" ? (
@@ -1446,8 +1450,8 @@ export default function App() {
                             </td>
                             <td>
                               <button
-                                disabled={busy || ("canEnter" in signal && signal.canEnter === false)}
-                                title={"canEnter" in signal && signal.canEnter === false
+                                disabled={busy || !!data.evTestEnabled || ("canEnter" in signal && signal.canEnter === false)}
+                                title={data.evTestEnabled ? "Ev-Test використовує нові точки входу з Конструктора стратегій" : "canEnter" in signal && signal.canEnter === false
                                   ? "Формація видима для аналізу, але максимальний вік нового входу вже минув"
                                   : undefined}
                                 onClick={() => {
@@ -1465,7 +1469,7 @@ export default function App() {
                                     );
                                 }}
                               >
-                                {"canEnter" in signal && signal.canEnter === false
+                                {data.evTestEnabled ? "Вхід через Ev-Test" : "canEnter" in signal && signal.canEnter === false
                                   ? "Вік входу вичерпано"
                                   : live ? "Реальний вхід" : "Тестовий вхід"}
                               </button>
