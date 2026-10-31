@@ -11,6 +11,8 @@ import {
 } from "./config";
 import { Mutex, type Store } from "./store";
 import { formationIsVisible, signalAllowsEntry } from "./formationState";
+import { EV_TEST_ID, selectEvTestCandidates } from "./evTestRouting";
+import type { EdwinSignal } from "./edwinStrategy";
 import { tradingScheduleState } from "./tradingSchedule";
 import type { MarketData } from "./market";
 import type { Vault } from "./security";
@@ -98,6 +100,16 @@ export class Trading {
   settings() {
     const saved = this.store.get<Partial<Settings>>("settings", {});
     return { ...structuredClone(DEFAULT_SETTINGS), ...saved };
+  }
+  private evTestEnabled() {
+    return this.store.get<{ enabled?: boolean }>("builder:edwin:config", {}).enabled === true;
+  }
+  private evTestCandidates(settings: Settings) {
+    return selectEvTestCandidates(
+      this.store.get<Signal[]>("signals", []),
+      this.store.get<EdwinSignal[]>("builder:edwin:signals", []),
+      settings,
+    );
   }
   private book(mode: Mode) {
     return this.store.get(
@@ -275,8 +287,10 @@ export class Trading {
           ) {
             b.lastEntryAt = Date.now();
             this.save(s.mode, b);
-            const signals = this.snapshot()
-              .signals.filter(
+            const signals = (this.evTestEnabled()
+              ? this.evTestCandidates(s)
+              : this.snapshot().signals)
+              .filter(
                 (signal) =>
                   !b.used[signal.id] &&
                   !b.positions.some((p) => p.symbol === signal.symbol),
@@ -321,8 +335,9 @@ export class Trading {
   }
   enter(signalId: string) {
     return this.mutex.run(async () => {
-      const signal = this.store
-        .get<Signal[]>("signals", [])
+      const signal = (this.evTestEnabled()
+        ? this.evTestCandidates(this.settings())
+        : this.store.get<Signal[]>("signals", []))
         .find((x) => x.id === signalId);
       if (!signal) throw new Error("Сигнал відсутній або вже застарів");
       await this.enterLocked(signal, false);
@@ -334,14 +349,18 @@ export class Trading {
       now = Date.now();
     if (automatic && (!s.autoEntries || !tradingScheduleState(s.tradingSchedule, now).allowed))
       throw new Error("Автоматичні входи призупинено або зараз поза торговим розкладом");
+    const isEvTest = signal.strategyId === EV_TEST_ID;
+    if (isEvTest !== this.evTestEnabled()) throw new Error("Стратегія перемкнулася; сигнал більше не активний");
+    if (isEvTest && !this.evTestCandidates(s).some((candidate) => candidate.id === signal.id))
+      throw new Error("Ev-Test: сигнал зник з актуального списку формацій або застарів");
     if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !Number.isInteger(signal.confidence) ||
       signal.confidence < 0 || signal.confidence > 100)
       throw new Error("Сигнал потребує нового сканування та оцінювання");
     if (
       signal.exchange !== s.exchange ||
-      !s.timeframes.includes(signal.timeframe) ||
-      !s.formationTypes.includes(signal.formation) ||
-      signal.confidence < s.minScore ||
+      (!isEvTest && !s.timeframes.includes(signal.timeframe)) ||
+      (!isEvTest && !s.formationTypes.includes(signal.formation)) ||
+      (!isEvTest && signal.confidence < s.minScore) ||
       (s.confirmedOnly && signal.status !== "confirmed")
     )
       throw new Error("Сигнал не відповідає поточним фільтрам");
@@ -372,14 +391,19 @@ export class Trading {
       s.slippageTolerancePercent
     )
       throw new Error("Ціна відійшла від точки входу більше дозволеного");
-    const direction = s.reverseEnabled
+    const direction = !isEvTest && s.reverseEnabled
       ? signal.direction === "LONG"
         ? "SHORT"
         : "LONG"
       : signal.direction;
     const sign = direction === "LONG" ? 1 : -1;
-    let stopLoss = price * (1 - (sign * s.stopLossPercent) / 100),
-      takeProfit = price * (1 + (sign * s.takeProfitPercent) / 100);
+    const notional = isEvTest ? s.orderNotionalUsdt * (signal.positionFraction || 0.25) : s.orderNotionalUsdt;
+    const slPct = isEvTest ? Math.abs(signal.stopLoss / signal.entryPrice - 1) * 100 : s.stopLossPercent;
+    const tpPct = isEvTest ? Math.abs(signal.takeProfit / signal.entryPrice - 1) * 100 : s.takeProfitPercent;
+    if (isEvTest && (slPct < 0.2 || slPct > 2 || tpPct < 0.5 || tpPct > 10))
+      throw new Error("Ev-Test: захисні рівні поза допустимими межами");
+    let stopLoss = price * (1 - sign * slPct / 100),
+      takeProfit = price * (1 + sign * tpPct / 100);
     let quantity: number;
     let paper: PaperState | undefined, executionPrice = price;
     if (s.mode === "paper") {
@@ -390,7 +414,7 @@ export class Trading {
       quantity = Number(
         (
           Math.floor(
-            s.orderNotionalUsdt / price / market.quantityStep + 1e-10,
+            notional / price / market.quantityStep + 1e-10,
           ) * market.quantityStep
         ).toPrecision(12),
       );
@@ -398,14 +422,14 @@ export class Trading {
       if (paper.latencyMs) await new Promise(resolve => setTimeout(resolve, paper!.latencyMs));
       const book = await this.market.getExecutionBook(s.exchange, signal.symbol);
       executionPrice = depthFill(book, direction === "LONG" ? "buy" : "sell", quantity);
-      if (quantity * executionPrice > s.orderNotionalUsdt) {
-        quantity = Number((Math.floor(s.orderNotionalUsdt / executionPrice / market.quantityStep + 1e-10) * market.quantityStep).toPrecision(12));
+      if (quantity * executionPrice > notional) {
+        quantity = Number((Math.floor(notional / executionPrice / market.quantityStep + 1e-10) * market.quantityStep).toPrecision(12));
         executionPrice = depthFill(book, direction === "LONG" ? "buy" : "sell", quantity);
       }
       if (Math.abs(executionPrice - signal.entryPrice) / signal.entryPrice * 100 > s.slippageTolerancePercent)
         throw new Error("Ціна виконання зі стакана перевищує допустиме відхилення");
       const tier = paper.tiers.find(t => quantity * executionPrice <= t.cap);
-      if (!tier || s.leverage > tier.maxLeverage || quantity * executionPrice > s.orderNotionalUsdt * 1.000001 ||
+      if (!tier || s.leverage > tier.maxLeverage || quantity * executionPrice > notional * 1.000001 ||
         (market.maxQuantity && quantity > market.maxQuantity)) throw new Error("Обсяг або плече перевищують біржовий ліміт");
       paper.closeFeeReserve = s.exchange === "bybit" ? executionPrice * quantity * (1 - sign / s.leverage) * paper.takerRate : 0;
       paper.initialMargin = executionPrice * quantity / s.leverage + paper.closeFeeReserve;
@@ -414,8 +438,8 @@ export class Trading {
       paper.entrySlippage = (executionPrice - price) * quantity * sign;
       paper.liquidationPrice = liquidationPrice({ direction, entryPrice: executionPrice, quantity }, paper);
       if (liquidatable({ direction, entryPrice: executionPrice, quantity }, paper, paper.markPrice)) throw new Error("Маржа недостатня вже при відкритті");
-      stopLoss = executionPrice * (1 - sign * s.stopLossPercent / 100);
-      takeProfit = executionPrice * (1 + sign * s.takeProfitPercent / 100);
+      stopLoss = executionPrice * (1 - sign * slPct / 100);
+      takeProfit = executionPrice * (1 + sign * tpPct / 100);
       const reserved = b.positions.reduce(
         (sum, p) => sum + (p.paper ? Math.max(0, p.paper.marginBalance ?? p.paper.initialMargin - p.paper.fundingCost) : (p.entryPrice * p.quantity) / s.leverage),
         0,
@@ -440,17 +464,19 @@ export class Trading {
       }
       if (account.positions.some((p) => p.symbol === signal.symbol))
         throw new Error("На біржі вже є позиція по цій монеті");
-      if (account.free < (s.orderNotionalUsdt / s.leverage) * 1.03)
+      if (account.free < (notional / s.leverage) * 1.03)
         throw new Error("Недостатньо вільної маржі на біржі");
       quantity = await this.gateway.quantity(
         s.exchange,
         signal.symbol,
         price,
-        s.orderNotionalUsdt,
+        notional,
       );
       await this.gateway.prepare(s.exchange, signal.symbol, s.leverage);
     }
     // Quotes, account reads and exchange preparation may span the session boundary.
+    if (isEvTest !== this.evTestEnabled() || (isEvTest && !this.evTestCandidates(this.settings()).some(candidate => candidate.id === signal.id)))
+      throw new Error("Ev-Test: умови або джерело монети змінилися до відправлення ордера");
     if (Date.now() - signal.candleAt > s.maxSignalAgeSeconds * 1000) throw new Error("Сигнал застарів під час підготовки виконання");
     if (automatic && !tradingScheduleState(s.tradingSchedule).allowed)
       throw new Error("Торгова сесія завершилася під час підготовки входу");
