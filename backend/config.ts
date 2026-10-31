@@ -152,6 +152,8 @@ export type Signal = {
   stopLoss: number;
   takeProfit: number;
   confidence: number;
+  strategyId?: "ev-test-v1";
+  positionFraction?: number;
   analysisVersion?: number;
   scoreParts?: { structure: number; breakout: number; volume: number };
   status: "confirmed" | "watching";

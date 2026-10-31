@@ -26,11 +26,13 @@ import { FORMATION_LABELS_UK } from "./formationLabels";
 import { paperWarningsText, signalConfirmationLabel, tradeHistoryCsv } from "./tradeHistoryCsv";
 import { scanIsOverdue, screenerEmptyState } from "./screenerStatus";
 import { TradingScheduleSettings } from "./components/TradingScheduleSettings";
+import { StrategyBuilder } from "./components/StrategyBuilder";
 import type { TradingScheduleState } from "../backend/tradingSchedule";
 import "./dashboard.css";
 
 type Snapshot = {
   settings: Settings;
+  evTestEnabled?: boolean;
   entrySchedule: TradingScheduleState;
   positions: any[];
   history: TradeHistoryEntry[];
@@ -865,6 +867,7 @@ export default function App() {
         {[
           { id: "overview", label: "Огляд" },
           { id: "screener", label: "Скрінер" },
+          { id: "builder", label: "Конструктор стратегій" },
           { id: "settings", label: "Налаштування" },
           { id: "logs", label: "Журнал" },
         ].map((item) => (
@@ -883,6 +886,7 @@ export default function App() {
           {[
             { id: "overview", label: "Огляд торгівлі", Icon: Activity },
             { id: "screener", label: "Скрінер формацій", Icon: BarChart3 },
+            { id: "builder", label: "Конструктор стратегій", Icon: Settings2 },
             { id: "settings", label: "Налаштування", Icon: Settings2 },
             { id: "logs", label: "Журнал подій", Icon: Clock3 },
           ].map(({ id, label, Icon }) => (
@@ -911,7 +915,9 @@ export default function App() {
                 {live ? "РЕАЛЬНИЙ РАХУНОК" : "ТЕСТУВАННЯ НА РЕАЛЬНОМУ РИНКУ"}
               </div>
               <h1>
-                {tab === "settings"
+                {tab === "builder"
+                  ? "Конструктор стратегій"
+                  : tab === "settings"
                   ? "Налаштування термінала"
                   : tab === "screener"
                     ? "Формації на всьому ринку"
@@ -920,14 +926,19 @@ export default function App() {
                       : "Огляд торгівлі"}
               </h1>
               <p className="muted">
-                USDT perpetual · {s.timeframes.join(" / ")} ·{" "}
-                {s.autoEntries
-                  ? data.entrySchedule?.allowed === false
-                    ? "Автоматичні входи очікують торгової сесії"
-                    : "Автоматичні входи увімкнено"
-                  : "Автоматичні входи на паузі"}
+                {tab === "builder" ? "Окремий сканер 1m / 5m · без автоматичних ордерів" : (
+                  <>
+                    USDT perpetual · {s.timeframes.join(" / ")} ·{" "}
+                    {s.autoEntries
+                      ? data.entrySchedule?.allowed === false
+                        ? "Автоматичні входи очікують торгової сесії"
+                        : "Автоматичні входи увімкнено"
+                      : "Автоматичні входи на паузі"}
+                  </>
+                )}
               </p>
             </div>
+            {tab !== "builder" && (
             <button
               disabled={busy || scan.running}
               onClick={() =>
@@ -945,6 +956,7 @@ export default function App() {
               <RefreshCw size={16} className={scan.running ? "spinning" : ""} />
               {scan.running ? "Скануємо…" : "Сканувати пакет"}
             </button>
+            )}
           </div>
           {data.entrySchedule?.enabled && (
             <div className="notice schedule-banner" role="status">
@@ -996,7 +1008,12 @@ export default function App() {
                 Ліміт API {exchange}: запити призупинено до {date(at)}.
               </div>
             ))}
-          {tab === "settings" ? (
+          {tab === "screener" && data.evTestEnabled && (
+            <div className="notice">Ev-Test активна: ці формації надалі відбирають монети, але старі точки входу вимкнені. Нові точки знаходяться у Конструкторі стратегій.</div>
+          )}
+          {tab === "builder" ? (
+            <StrategyBuilder onOpenChart={(signal) => openChart({ ...signal, formation: signal.pattern })} />
+          ) : tab === "settings" ? (
             <SettingsPanel data={data} run={run} />
           ) : tab === "logs" ? (
             <section className="panel">
@@ -1433,8 +1450,8 @@ export default function App() {
                             </td>
                             <td>
                               <button
-                                disabled={busy || ("canEnter" in signal && signal.canEnter === false)}
-                                title={"canEnter" in signal && signal.canEnter === false
+                                disabled={busy || !!data.evTestEnabled || ("canEnter" in signal && signal.canEnter === false)}
+                                title={data.evTestEnabled ? "Ev-Test використовує нові точки входу з Конструктора стратегій" : "canEnter" in signal && signal.canEnter === false
                                   ? "Формація видима для аналізу, але максимальний вік нового входу вже минув"
                                   : undefined}
                                 onClick={() => {
@@ -1452,7 +1469,7 @@ export default function App() {
                                     );
                                 }}
                               >
-                                {"canEnter" in signal && signal.canEnter === false
+                                {data.evTestEnabled ? "Вхід через Ev-Test" : "canEnter" in signal && signal.canEnter === false
                                   ? "Вік входу вичерпано"
                                   : live ? "Реальний вхід" : "Тестовий вхід"}
                               </button>

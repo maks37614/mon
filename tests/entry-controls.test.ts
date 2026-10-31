@@ -271,3 +271,52 @@ for (const onlyConfirmed of [false, true])
       assert.equal(result.directionScore, 0);
     }
   });
+
+
+test("Ev-Test overrides old entry rules only when enabled, including simulated and live order protection", async (t) => {
+  for (const mode of ["paper", "live"] as const) {
+    await t.test(mode, async (st) => {
+      const f = fixture(st, { mode, reverseEnabled: true, orderNotionalUsdt: 100 });
+      f.store.set("builder:edwin:config", { enabled: true, maxHoldMinutes: 45, maxDailyLossPercent: 3 });
+      f.store.set("builder:edwin:signals", [{
+        id: "ev-fixture-" + mode, strategyId: "ev-test-v1", exchange: "binance",
+        symbol: "BTCUSDT", timeframe: "1m", zone: 3, pattern: "Пробій Ev-Test",
+        direction: "LONG", candleAt: Date.now() - 1000, detectedAt: Date.now(),
+        entryPrice: 100, stopLoss: 99.5, takeProfit: 102.5,
+        positionFraction: 0.5, description: "test signal",
+      }]);
+      await f.trading.monitor();
+      const positions = f.trading.snapshot().positions;
+      assert.equal(positions.length, 1, "Ev-Test should enter instead of the legacy signal");
+      assert.equal(positions[0].formation, "Пробій Ev-Test");
+      assert.equal(positions[0].direction, "LONG", "Ev-Test direction should not be reversed by the old setting");
+      assert.ok(Math.abs(positions[0].stopLoss - 99.5) < 1e-8);
+      assert.ok(Math.abs(positions[0].takeProfit - 102.5) < 1e-8);
+      assert.ok(Math.abs(positions[0].quantity * 100 - 50) < 0.1, "Half notional must be used");
+      assert.equal(f.broker.submitted.length, mode === "live" ? 1 : 0);
+    });
+  }
+});
+
+test("When Ev-Test is enabled it never falls back to a legacy formation entry", async (t) => {
+  const f = fixture(t, { mode: "paper" });
+  f.store.set("builder:edwin:config", { enabled: true });
+  await f.trading.monitor();
+  assert.equal(f.trading.snapshot().positions.length, 0);
+  await assert.rejects(f.trading.enter(f.signal.id), /відсутній|застарів/);
+});
+
+test("Ev-Test requires an eligible existing formation source before automatic entry", async (t) => {
+  const f = fixture(t, { mode: "paper" });
+  f.store.set("builder:edwin:config", { enabled: true });
+  f.store.set("signals", []);
+  f.store.set("builder:edwin:signals", [{
+    id: "ev-unselected", strategyId: "ev-test-v1", exchange: "binance",
+    symbol: "BTCUSDT", timeframe: "1m", zone: 2, pattern: "Пробій",
+    direction: "LONG", candleAt: Date.now() - 1000, detectedAt: Date.now(),
+    entryPrice: 100, stopLoss: 99.5, takeProfit: 102.5, positionFraction: 1,
+    description: "must not enter",
+  }]);
+  await f.trading.monitor();
+  assert.equal(f.trading.snapshot().positions.length, 0);
+});
