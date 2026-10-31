@@ -170,7 +170,11 @@ export function createApplication(options: Options) {
   // Isolated strategy builder; never routes its signals to Trading.enter().
   app.get("/api/strategy-builder", (_req, res) => res.json(strategyBuilder.snapshot()));
   app.put("/api/strategy-builder", route((req, res) => {
-    res.json(strategyBuilder.update(req.body));
+    const { liveAcknowledged, ...configuration } = req.body || {};
+    if (configuration.enabled === true && trading.settings().mode === "live" &&
+        trading.settings().autoEntries && liveAcknowledged !== true)
+      return res.status(400).json({ error: "Підтвердіть можливість реальних авто-ордерів Ev-Test" });
+    res.json(strategyBuilder.update(configuration));
   }));
   app.post("/api/strategy-builder/scan", (_req, res) => {
     const result = strategyBuilder.start(true);
