@@ -10,6 +10,10 @@ export type EdwinSettings = {
   minimumTouches: number;
   stopLossPercent: number;
   takeProfitPercent: number;
+  maxSpreadPercent: number;
+  maxHoldMinutes: number;
+  maxDailyLossPercent: number;
+  minVolumeRatio: number;
 };
 
 export const EDWIN_DEFAULTS: EdwinSettings = {
@@ -21,6 +25,10 @@ export const EDWIN_DEFAULTS: EdwinSettings = {
   minimumTouches: 3,
   stopLossPercent: 0.5,
   takeProfitPercent: 2.5,
+  maxSpreadPercent: 0.25,
+  maxHoldMinutes: 45,
+  maxDailyLossPercent: 3,
+  minVolumeRatio: 0.7,
 };
 
 export const EDWIN_STRATEGY = {
@@ -35,10 +43,12 @@ export const EDWIN_STRATEGY = {
     "Повторний пробій лою (зона 5)",
     "Перший перехай / перелой після імпульсу (зона 1)",
     "Продовження після імпульсної наторговки (зона 1)",
+    "Закол локального мінімуму / максимуму та повернення (1m)",
+    "Локальний пробій перед основним рівнем (зона 3)",
   ],
   unsupported: [
-    "Стакан, щільності, реальна ліквідність і зняття стопів",
-    "Суб’єктивна якість сетапу та поведінка конкретної монети",
+    "Точне прогнозування скупчень стопів (видимі тільки заявки стакана)",
+    "Суб’єктивна якість сетапу, не формалізована в правилах лекції",
     "Динамічний набір кількох пачок у вже відкриту позицію",
   ],
 } as const;
@@ -57,6 +67,10 @@ export function validateEdwinSettings(input: unknown, previous: EdwinSettings): 
     minimumTouches: [3, 6, true],
     stopLossPercent: [0.2, 2, false],
     takeProfitPercent: [0.5, 10, false],
+    maxSpreadPercent: [0.02, 2, false],
+    maxHoldMinutes: [5, 240, true],
+    maxDailyLossPercent: [0.5, 20, false],
+    minVolumeRatio: [0.1, 3, false],
   };
   for (const [key, [min, max, integer]] of Object.entries(numeric)) {
     const value = next[key as keyof EdwinSettings];
@@ -141,6 +155,10 @@ export function detectEdwinSetups(
     const latest = rows[rows.length - 1];
     const entry = latest.close;
     if (!Number.isFinite(entry) || entry <= 0) return;
+    // A weak candle on thin volume is more likely to be a false breakout.
+    const previousVolume = rows.slice(-22, -2);
+    const baselineVolume = previousVolume.reduce((sum, bar) => sum + bar.volume, 0) / Math.max(1, previousVolume.length);
+    if (baselineVolume > 0 && latest.volume / baselineVolume < settings.minVolumeRatio) return;
     const factor = direction === "LONG" ? 1 : -1;
     all.push({
       id: [EDWIN_STRATEGY.id, exchange, symbol, timeframe, pattern, direction, latest.time].join(":"),
@@ -188,13 +206,29 @@ export function detectEdwinSetups(
           add(slow, "5m", 4, "Пробій каскаду хаїв", "LONG", "Щонайменше " + settings.minimumTouches + " близьких локальних максимумів і підтверджений пробій.");
         if (side === "low" && previous.close >= level * (1 - buffer) && latest.close < level * (1 - buffer))
           add(slow, "5m", 4, "Пробій каскаду лоїв", "SHORT", "Щонайменше " + settings.minimumTouches + " близьких локальних мінімумів і підтверджений пробій.");
-        break;
+        // Search all recent extrema, not only the first anchor.
       }
     }
     for (const side of ["high", "low"] as const) {
       const line = lineBreak(slow.slice(-70), side, settings.minimumTouches, buffer);
       if (line) add(slow, "5m", 4, "Пробій наклонки / трендової", line.direction, "Злам похилої лінії із " + settings.minimumTouches + "+ локальними дотиками на 5m.");
     }
+  }
+
+
+  // Zone 3: local leg into a major resistance/support. This is distinct from simply breaking the major level.
+  if (slow.length >= 100) {
+    const last = slow.at(-1)!;
+    const prior = slow.at(-2)!;
+    const priorRange = slow.slice(-100, -10);
+    const high = maxHigh(priorRange), low = minLow(priorRange);
+    const leg = slow.slice(-6, -1);
+    if (pct(maxHigh(leg), high) <= settings.proximityPercent && last.close > maxHigh(leg) * (1 + buffer)
+        && prior.close <= maxHigh(leg) * (1 + buffer) && last.close < high)
+      add(slow, "5m", 3, "Пробій локального хая під рівнем", "LONG", "Локальний пробій при підході до верхнього опору.");
+    if (pct(minLow(leg), low) <= settings.proximityPercent && last.close < minLow(leg) * (1 - buffer)
+        && prior.close >= minLow(leg) * (1 - buffer) && last.close > low)
+      add(slow, "5m", 3, "Пробій локального лоя над підтримкою", "SHORT", "Локальний пробій при підході до нижньої підтримки.");
   }
 
   const fast = oneMinute;
@@ -229,6 +263,23 @@ export function detectEdwinSetups(
         if (line) add(fast, "1m", 1, "Злам трендової після сильного руху", line.direction, "Сильна волатильність 15%+ і підтверджений пробій 1m трендової.");
       }
     }
+  }
+
+
+  // 1m liquidity sweep proxy: a held intraminute floor/ceiling is briefly pierced and recovered.
+  // This is not the same as observing actual stop orders.
+  if (fast.length >= 40) {
+    const recent = fast.slice(-8, -2);
+    const sweep = fast.at(-2)!;
+    const confirmation = fast.at(-1)!;
+    const support = minLow(recent), resistance = maxHigh(recent);
+    const tight = pct(resistance, support) <= 1.8;
+    if (tight && sweep.low < support * (1 - buffer)
+        && sweep.close > support && confirmation.close > sweep.high * (1 + buffer))
+      add(fast, "1m", 4, "Закол лоя й підтверджений відскок", "LONG", "Прокол підтримки з поверненням та пробоєм хая свічки заколу.");
+    if (tight && sweep.high > resistance * (1 + buffer)
+        && sweep.close < resistance && confirmation.close < sweep.low * (1 - buffer))
+      add(fast, "1m", 4, "Закол хая й підтверджений відскок", "SHORT", "Прокол опору з поверненням та пробоєм лоя свічки заколу.");
   }
 
   return [...new Map(all.map((signal) => [signal.id, signal])).values()].slice(0, 12);
