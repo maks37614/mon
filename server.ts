@@ -10,6 +10,7 @@ import { Store } from "./backend/store";
 import { Auth, Vault, safeEqual } from "./backend/security";
 import { MarketData } from "./backend/market";
 import { Scanner } from "./backend/scanner";
+import { StrategyBuilderScanner } from "./backend/strategyBuilder";
 import { Trading } from "./backend/trading";
 import { ExchangeGateway, exchangeError } from "./backend/exchange";
 import { DEFAULT_SETTINGS, type Exchange } from "./backend/config";
@@ -65,6 +66,7 @@ export function createApplication(options: Options) {
     gateway,
     options.liveAllowed === true,
   );
+  const strategyBuilder = new StrategyBuilderScanner(store, market, () => trading.settings().exchange);
   const auth = new Auth(
     store,
     origin,
@@ -163,6 +165,15 @@ export function createApplication(options: Options) {
   );
   app.post("/api/scan", (_req, res) => {
     const result = scanner.start();
+    res.status(result.accepted ? 202 : 200).json(result);
+  });
+  // Isolated strategy builder; never routes its signals to Trading.enter().
+  app.get("/api/strategy-builder", (_req, res) => res.json(strategyBuilder.snapshot()));
+  app.put("/api/strategy-builder", route((req, res) => {
+    res.json(strategyBuilder.update(req.body));
+  }));
+  app.post("/api/strategy-builder/scan", (_req, res) => {
+    const result = strategyBuilder.start(true);
     res.status(result.accepted ? 202 : 200).json(result);
   });
   const exchangeParam = (req: Request): Exchange => {
@@ -297,14 +308,17 @@ export function createApplication(options: Options) {
     trading,
     market,
     scanner,
+    strategyBuilder,
     gateway,
     start() {
       trading.start();
+      strategyBuilder.startTimer();
       if (options.schedulerMode === "internal")
         scheduler = setInterval(() => scanner.start(false, "internal"), 10_000);
     },
     async stop() {
       if (scheduler) clearInterval(scheduler);
+      await strategyBuilder.stop();
       await trading.stop();
       if (scanner.task) await scanner.task;
       store.close();
