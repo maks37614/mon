@@ -20,6 +20,8 @@ type BuilderState = {
   };
   signals: EdwinSignal[];
   tradingConnected: boolean;
+  autoEntriesEnabled?: boolean;
+  tradingMode?: "paper" | "live";
 };
 const number = (value: number) => Number(value).toLocaleString("en-US", { maximumSignificantDigits: 8 });
 const when = (at?: number) => at
@@ -41,6 +43,10 @@ const fields: {
   { key: "minimumTouches", label: "Мінімум торкань", min: 3, max: 6, step: 1, hint: "Вимога для каскадів і трендових." },
   { key: "stopLossPercent", label: "Орієнтир стопа, %", min: 0.2, max: 2, step: 0.1, hint: "Стоп для Ev-Test позиції; реальне виконання дозволяється окремими системними параметрами." },
   { key: "takeProfitPercent", label: "Орієнтир цілі, %", min: 0.5, max: 10, step: 0.5, hint: "Ціль для Ev-Test позиції." },
+  { key: "maxSpreadPercent", label: "Максимальний спред, %", min: 0.02, max: 2, step: 0.01, hint: "Відхилення між bid та ask; більший спред блокує сигнал." },
+  { key: "maxHoldMinutes", label: "Максимум утримання, хв.", min: 5, max: 240, step: 5, hint: "Тайм-стоп для нових позицій Ev-Test." },
+  { key: "maxDailyLossPercent", label: "Ліміт денного збитку, %", min: 0.5, max: 20, step: 0.5, hint: "Зупинка нових Ev-Test входів за денним чистим результатом." },
+  { key: "minVolumeRatio", label: "Мінімальна відносна сила обсягу", min: 0.1, max: 3, step: 0.1, hint: "Обсяг свічки відносно середнього за 20 попередніх." },
 ];
 
 export function StrategyBuilder({ onOpenChart }: { onOpenChart: (signal: EdwinSignal) => void }) {
@@ -116,7 +122,7 @@ export function StrategyBuilder({ onOpenChart }: { onOpenChart: (signal: EdwinSi
         </div>
         <div className="notice">
           <ShieldCheck size={16}/>
-          <span><strong>Контрольований автоматичний режим.</strong> Коли Ev-Test увімкнено та в основному боті дозволено авто-входи, нові угоди проходять через той самий захищений торговий модуль. При вимкненні повертається старий алгоритм. Відкриті позиції продовжують супроводжуватися.</span>
+          <span><strong>{data?.tradingMode === "live" ? "Реальний рахунок" : "Віртуальний рахунок"} · {data?.autoEntriesEnabled ? "Авто-входи активні" : "Авто-входи основного бота вимкнені"}.</strong> Ev-Test підміняє точки входу тільки для монет із чинного скрінера формацій; при вимкненні повертаються старі правила. Захисні перевірки, ліміти позицій та супровід відкритих угод залишаються у торговому модулі.</span>
         </div>
       </section>
 
