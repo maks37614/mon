@@ -104,7 +104,33 @@ export class StrategyBuilderScanner {
           this.market.getCandles(exchange, symbol, "5m", 180, true),
         ]);
         const latest = detectEdwinSetups(exchange, symbol, fast, slow, settings);
-        found.push(...latest);
+        if (latest.length) {
+          // Validate the real bid/ask spread and visible depth before exposing an entry.
+          // Book snapshots do not reveal hidden liquidity or resting stop orders.
+          const book = await this.market.getExecutionBook(exchange, symbol);
+          const bid = book.bids[0]?.[0], ask = book.asks[0]?.[0];
+          if (!bid || !ask || ask <= bid || !Number.isFinite(bid) || !Number.isFinite(ask))
+            throw new Error("Некоректний стакан");
+          const spreadPercent = (ask - bid) / ((ask + bid) / 2) * 100;
+          if (spreadPercent <= settings.maxSpreadPercent) {
+            const bidLiquidity = book.bids.slice(0, 30).reduce((sum, [price, quantity]) => sum + price * quantity, 0);
+            const askLiquidity = book.asks.slice(0, 30).reduce((sum, [price, quantity]) => sum + price * quantity, 0);
+            // Basic market depth is a quality check, not evidence of actual fills.
+            if (bidLiquidity >= 100 && askLiquidity >= 100) {
+              // Check recent 3 days of 5m price action. This is a context annotation,
+              // not a promise that a historic pattern must repeat.
+              const history = await this.market.getCandles(exchange, symbol, "5m", 864, true);
+              const lookback = history.slice(0, -6);
+              const meanRange = lookback.reduce((sum, row) => sum + ((row.high - row.low) / row.close) * 100, 0) / Math.max(1, lookback.length);
+              for (const signal of latest) {
+                const delta = signal.direction === "LONG" ? "купівлю" : "продаж";
+                signal.description += " | Спред " + spreadPercent.toFixed(3) + "%; середній діапазон 5m за ~3 дні " +
+                  meanRange.toFixed(2) + "%; напрям " + delta + ".";
+                found.push(signal);
+              }
+            }
+          }
+        }
         scanned++;
       } catch (error: any) {
         failed++;
