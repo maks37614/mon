@@ -103,11 +103,17 @@ export function StrategyBuilder({ onOpenChart }: { onOpenChart: (signal: EdwinSi
             className={data?.settings.enabled ? "" : "primary"}
             disabled={busy || !data}
             onClick={() => void action(
-              () => api("/api/strategy-builder", { enabled: !data!.settings.enabled }, "PUT"),
-              data?.settings.enabled ? "Фоновий пошук вимкнено" : "Фоновий пошук увімкнено",
+              async () => {
+                const enabling = !data!.settings.enabled;
+                const liveAuto = enabling && data!.tradingMode === "live" && data!.autoEntriesEnabled;
+                if (liveAuto && !window.confirm("Ev-Test замінить правила входу і може відкривати РЕАЛЬНІ угоди з поточними лімітами бота. Увімкнути?"))
+                  throw new Error("Увімкнення скасовано");
+                return api("/api/strategy-builder", { enabled: enabling, liveAcknowledged: liveAuto }, "PUT");
+              },
+              data?.settings.enabled ? "Ev-Test вимкнена" : "Ev-Test увімкнена",
             )}
           >
-            <Activity size={16}/>{data?.settings.enabled ? "Вимкнути стратегію" : "Увімкнути пошук"}
+            <Activity size={16}/>{data?.settings.enabled ? "Вимкнути Ev-Test" : "Увімкнути Ev-Test"}
           </button>
           <button
             disabled={busy || !data?.settings.enabled || !!status.running}
