@@ -83,6 +83,7 @@ export class Trading {
   private lastLiveCycle = 0;
   private paperGaps = new Set<string>();
   private paperErrorLog = new Map<string, number>();
+  private evTestRejectionLog = new Map<string, number>();
   private paperWatched = new Map<string, Position>();
   private paperTicks = new Map<string, PriceTick & { lastAt?: number; markAt?: number; trigger?: PaperState["closeTrigger"] }>();
   private feed = new PaperFeed((exchange, symbol, tick) => this.paperTick(exchange, symbol, tick),
@@ -319,8 +320,17 @@ export class Trading {
                 break;
               try {
                 await this.enterLocked(signal, true);
-              } catch {
-                /* A rejected signal is retried only after the next configured entry interval. */
+              } catch (error: any) {
+                // Make Ev-Test rejection reasons visible without flooding the existing log.
+                if (signal.strategyId === EV_TEST_ID) {
+                  const reason = String(error?.message || "Вхід не пройшов перевірки").slice(0, 160);
+                  const key = signal.symbol + ":" + reason;
+                  if (Date.now() - (this.evTestRejectionLog.get(key) || 0) > 60_000) {
+                    this.evTestRejectionLog.set(key, Date.now());
+                    this.store.log("INFO", "Ev-Test " + signal.symbol + ": " + reason);
+                  }
+                  if (this.evTestRejectionLog.size > 300) this.evTestRejectionLog.clear();
+                }
               }
             }
           }
