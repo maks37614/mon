@@ -24,8 +24,8 @@ export const EDWIN_DEFAULTS: EdwinSettings = {
 };
 
 export const EDWIN_STRATEGY = {
-  id: "edwin-breakouts-v1",
-  name: "Edwin — рівні, пробої та трендові",
+  id: "ev-test-v1",
+  name: "Ev-Test",
   description: "Евристичний пошук сетапів лекції на закритих 1m / 5m свічках. Не є доказом прибутковості.",
   implemented: [
     "Пробій рівня (зона 2)",
@@ -39,7 +39,7 @@ export const EDWIN_STRATEGY = {
   unsupported: [
     "Стакан, щільності, реальна ліквідність і зняття стопів",
     "Суб’єктивна якість сетапу та поведінка конкретної монети",
-    "Автоматичне виконання або збільшення торгових позицій",
+    "Динамічний набір кількох пачок у вже відкриту позицію",
   ],
 } as const;
 
@@ -70,7 +70,7 @@ export function validateEdwinSettings(input: unknown, previous: EdwinSettings): 
 
 export type EdwinSignal = {
   id: string;
-  strategyId: "edwin-breakouts-v1";
+  strategyId: "ev-test-v1";
   exchange: Exchange;
   symbol: string;
   timeframe: "1m" | "5m";
@@ -82,6 +82,7 @@ export type EdwinSignal = {
   entryPrice: number;
   stopLoss: number;
   takeProfit: number;
+  positionFraction: number;
   description: string;
 };
 
@@ -145,11 +146,12 @@ export function detectEdwinSetups(
       id: [EDWIN_STRATEGY.id, exchange, symbol, timeframe, pattern, direction, latest.time].join(":"),
       strategyId: EDWIN_STRATEGY.id,
       exchange, symbol, timeframe, zone, pattern, direction,
-      candleAt: latest.time,
+      candleAt: latest.time + (timeframe === "1m" ? 60_000 : 300_000),
       detectedAt: now,
       entryPrice: entry,
       stopLoss: entry * (1 - factor * settings.stopLossPercent / 100),
       takeProfit: entry * (1 + factor * settings.takeProfitPercent / 100),
+      positionFraction: /трендов|наклонк/i.test(pattern) ? 0.5 : /пампу|дампу|імпульс/i.test(pattern) ? 0.25 : 1,
       description,
     });
   }
