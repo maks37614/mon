@@ -189,6 +189,7 @@ export class Trading {
       .filter((signal) => formationIsVisible(signal, s, now));
     return {
       settings: s,
+      evTestEnabled: this.evTestEnabled(),
       entrySchedule: tradingScheduleState(s.tradingSchedule, now),
       positions: b.positions.map(({ intent, ...p }) => ({
         ...p,
