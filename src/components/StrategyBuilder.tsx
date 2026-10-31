@@ -19,7 +19,7 @@ type BuilderState = {
     scanned?: number; failed?: number; detected?: number; error?: string | null;
   };
   signals: EdwinSignal[];
-  tradingConnected: false;
+  tradingConnected: boolean;
 };
 const number = (value: number) => Number(value).toLocaleString("en-US", { maximumSignificantDigits: 8 });
 const when = (at?: number) => at
@@ -35,12 +35,12 @@ const fields: {
   hint: string;
 }[] = [
   { key: "scanIntervalSeconds", label: "Період сканування, сек.", min: 60, max: 3600, step: 30, hint: "Автоматичне фонове сканування на сервері." },
-  { key: "symbolsPerBatch", label: "Монет за цикл", min: 5, max: 80, step: 1, hint: "Перевіряє 1m і 5m по черзі; увесь ринок обходиться пакетами." },
+  { key: "symbolsPerBatch", label: "Монет із чинних формацій за цикл", min: 5, max: 80, step: 1, hint: "Сканує тільки монети, уже відібрані скрінером формацій." },
   { key: "proximityPercent", label: "Відстань до рівня, %", min: 1, max: 8, step: 0.5, hint: "Зона інтересу для передпробійної наторговки." },
   { key: "breakoutBufferPercent", label: "Підтвердження пробою, %", min: 0.02, max: 0.5, step: 0.02, hint: "Наскільки закрита свічка має перейти за рівень." },
   { key: "minimumTouches", label: "Мінімум торкань", min: 3, max: 6, step: 1, hint: "Вимога для каскадів і трендових." },
-  { key: "stopLossPercent", label: "Орієнтир стопа, %", min: 0.2, max: 2, step: 0.1, hint: "Тільки інформаційний рівень; не створює реальний стоп-ордер." },
-  { key: "takeProfitPercent", label: "Орієнтир цілі, %", min: 0.5, max: 10, step: 0.5, hint: "Тільки інформаційний рівень; не створює реальний тейк-профіт." },
+  { key: "stopLossPercent", label: "Орієнтир стопа, %", min: 0.2, max: 2, step: 0.1, hint: "Стоп для Ev-Test позиції; реальне виконання дозволяється окремими системними параметрами." },
+  { key: "takeProfitPercent", label: "Орієнтир цілі, %", min: 0.5, max: 10, step: 0.5, hint: "Ціль для Ev-Test позиції." },
 ];
 
 export function StrategyBuilder({ onOpenChart }: { onOpenChart: (signal: EdwinSignal) => void }) {
@@ -83,8 +83,8 @@ export function StrategyBuilder({ onOpenChart }: { onOpenChart: (signal: EdwinSi
         <div className="section-heading">
           <div>
             <div className="eyebrow">КОНСТРУКТОР СТРАТЕГІЙ · №1</div>
-            <h2>{strategy?.name || "Edwin — рівні, пробої та трендові"}</h2>
-            <p className="muted">Окремий алгоритм пошуку, не пов'язаний з автоматичними входами основного бота.</p>
+            <h2>{strategy?.name || "Ev-Test"}</h2>
+            <p className="muted">Коли увімкнено — замінює правила входу поточного бота, зберігаючи відбір монет його скрінера.</p>
           </div>
           <span className={"pill " + (data?.settings.enabled ? "positive" : "")}>
             {data?.settings.enabled ? "Пошук увімкнено" : "Вимкнено"}
@@ -116,7 +116,7 @@ export function StrategyBuilder({ onOpenChart }: { onOpenChart: (signal: EdwinSi
         </div>
         <div className="notice">
           <ShieldCheck size={16}/>
-          <span><strong>Лише пошук сигналів.</strong> Ця стратегія не має доступу до API створення ордерів. Вона не змінює відкриті позиції, баланси, налаштування або результати основного бота.</span>
+          <span><strong>Контрольований автоматичний режим.</strong> Коли Ev-Test увімкнено та в основному боті дозволено авто-входи, нові угоди проходять через той самий захищений торговий модуль. При вимкненні повертається старий алгоритм. Відкриті позиції продовжують супроводжуватися.</span>
         </div>
       </section>
 
