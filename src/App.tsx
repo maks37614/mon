@@ -26,6 +26,7 @@ import { FORMATION_LABELS_UK } from "./formationLabels";
 import { paperWarningsText, signalConfirmationLabel, tradeHistoryCsv } from "./tradeHistoryCsv";
 import { scanIsOverdue, screenerEmptyState } from "./screenerStatus";
 import { TradingScheduleSettings } from "./components/TradingScheduleSettings";
+import { StrategyBuilder } from "./components/StrategyBuilder";
 import type { TradingScheduleState } from "../backend/tradingSchedule";
 import "./dashboard.css";
 
@@ -865,6 +866,7 @@ export default function App() {
         {[
           { id: "overview", label: "Огляд" },
           { id: "screener", label: "Скрінер" },
+          { id: "builder", label: "Конструктор стратегій" },
           { id: "settings", label: "Налаштування" },
           { id: "logs", label: "Журнал" },
         ].map((item) => (
@@ -883,6 +885,7 @@ export default function App() {
           {[
             { id: "overview", label: "Огляд торгівлі", Icon: Activity },
             { id: "screener", label: "Скрінер формацій", Icon: BarChart3 },
+            { id: "builder", label: "Конструктор стратегій", Icon: Settings2 },
             { id: "settings", label: "Налаштування", Icon: Settings2 },
             { id: "logs", label: "Журнал подій", Icon: Clock3 },
           ].map(({ id, label, Icon }) => (
@@ -911,7 +914,9 @@ export default function App() {
                 {live ? "РЕАЛЬНИЙ РАХУНОК" : "ТЕСТУВАННЯ НА РЕАЛЬНОМУ РИНКУ"}
               </div>
               <h1>
-                {tab === "settings"
+                {tab === "builder"
+                  ? "Конструктор стратегій"
+                  : tab === "settings"
                   ? "Налаштування термінала"
                   : tab === "screener"
                     ? "Формації на всьому ринку"
@@ -996,7 +1001,9 @@ export default function App() {
                 Ліміт API {exchange}: запити призупинено до {date(at)}.
               </div>
             ))}
-          {tab === "settings" ? (
+          {tab === "builder" ? (
+            <StrategyBuilder onOpenChart={(signal) => openChart({ ...signal, formation: signal.pattern })} />
+          ) : tab === "settings" ? (
             <SettingsPanel data={data} run={run} />
           ) : tab === "logs" ? (
             <section className="panel">
