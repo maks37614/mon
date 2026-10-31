@@ -74,7 +74,7 @@ export function StrategyBuilder({ onOpenChart }: { onOpenChart: (signal: EdwinSi
       setError(e.message || "Помилка");
     } finally { setBusy(false); }
   }
-  const status = data?.status || {};
+  const status: BuilderState["status"] = data?.status || {};
   const strategy = data?.strategies?.[0];
 
   return (
