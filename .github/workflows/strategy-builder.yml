@@ -4,11 +4,15 @@ on:
     paths:
       - "backend/edwinStrategy.ts"
       - "backend/strategyBuilder.ts"
+      - "backend/evTestRouting.ts"
+      - "backend/trading.ts"
+      - "backend/config.ts"
       - "src/components/StrategyBuilder.tsx"
       - "src/App.tsx"
       - "src/dashboard.css"
       - "server.ts"
       - "tests/edwinStrategy.test.ts"
+      - "tests/evTestRouting.test.ts"
       - ".github/workflows/strategy-builder.yml"
   workflow_dispatch:
 permissions:
