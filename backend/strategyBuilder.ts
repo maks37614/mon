@@ -1,4 +1,5 @@
-import type { Exchange } from "./config";
+import { DEFAULT_SETTINGS, type Exchange, type Signal } from "./config";
+import { formationIsVisible } from "./formationState";
 import type { Store } from "./store";
 import type { MarketData } from "./market";
 import {
@@ -6,7 +7,7 @@ import {
   type EdwinSettings, type EdwinSignal,
 } from "./edwinStrategy";
 
-/** Independent scanner. It has no reference to the Trading/order gateway. */
+/** Scanner of strategy entry confirmations, restricted to the existing formations universe. */
 export class StrategyBuilderScanner {
   running = false;
   task: Promise<void> | null = null;
@@ -35,7 +36,7 @@ export class StrategyBuilderScanner {
       settings,
       status: { ...status, running: this.running },
       signals,
-      tradingConnected: false,
+      tradingConnected: settings.enabled,
     };
   }
 
@@ -77,8 +78,16 @@ export class StrategyBuilderScanner {
 
   private async run(settings: EdwinSettings) {
     const exchange = this.exchange();
-    const markets = await this.market.getMarkets(exchange);
-    if (!markets.length) throw new Error("Немає доступних USDT perpetual контрактів");
+    // Symbols are selected exclusively by the existing formations screener; never scan the whole exchange.
+    const sourceSettings = this.store.get("settings", DEFAULT_SETTINGS);
+    const sourceSignals = this.store.get<Signal[]>("signals", [])
+      .filter((signal) => formationIsVisible(signal, sourceSettings));
+    const markets = [...new Set(sourceSignals.filter((signal) => signal.exchange === exchange).map((signal) => signal.symbol))].sort();
+    if (!markets.length) {
+      this.store.set("builder:edwin:signals", []);
+      this.store.set("builder:edwin:status", { running: false, exchange, lastStartedAt: this.store.get<any>("builder:edwin:status", {}).lastStartedAt || Date.now(), lastFinishedAt: Date.now(), cursor: 0, total: 0, scanned: 0, failed: 0, detected: 0, error: "Скрінер формацій поки не відібрав монет" });
+      return;
+    }
     const previous = this.store.get<any>("builder:edwin:status", {});
     const cursor = previous.exchange === exchange ? (previous.cursor || 0) % markets.length : 0;
     const count = Math.min(settings.symbolsPerBatch, markets.length);
@@ -88,7 +97,7 @@ export class StrategyBuilderScanner {
     for (let i = 0; i < count; i++) {
       // A switch-off must stop new API work rather than complete an unwanted batch.
       if (!this.settings().enabled) break;
-      const symbol = markets[index].symbol;
+      const symbol = markets[index];
       try {
         const [fast, slow] = await Promise.all([
           this.market.getCandles(exchange, symbol, "1m", 180, true),
@@ -109,7 +118,7 @@ export class StrategyBuilderScanner {
     // Only update strategy-specific storage. Never touch 'signals', books or bot settings.
     const now = Date.now();
     const kept = this.store.get<EdwinSignal[]>("builder:edwin:signals", []).filter((signal) =>
-      signal.exchange === exchange &&
+      signal.exchange === exchange && markets.includes(signal.symbol) &&
       now - signal.candleAt <= (signal.timeframe === "1m" ? 10 : 20) * 60_000
     );
     const merged = new Map(kept.map((signal) => [signal.id, signal]));
@@ -118,7 +127,7 @@ export class StrategyBuilderScanner {
     this.store.set("builder:edwin:status", {
       running: false, exchange, lastStartedAt: previous.lastStartedAt || now, lastFinishedAt: now,
       lastFullPassAt: this.store.get<number | null>("builder:edwin:lastFullPass", null),
-      cursor: index, total: markets.length, scanned, failed, detected: found.length, error: message || null,
+      cursor: index, total: markets.length, scanned, failed, detected: found.length, source: "formations", error: message || null,
     });
   }
 
