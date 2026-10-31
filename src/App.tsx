@@ -925,14 +925,19 @@ export default function App() {
                       : "Огляд торгівлі"}
               </h1>
               <p className="muted">
-                USDT perpetual · {s.timeframes.join(" / ")} ·{" "}
-                {s.autoEntries
-                  ? data.entrySchedule?.allowed === false
-                    ? "Автоматичні входи очікують торгової сесії"
-                    : "Автоматичні входи увімкнено"
-                  : "Автоматичні входи на паузі"}
+                {tab === "builder" ? "Окремий сканер 1m / 5m · без автоматичних ордерів" : (
+                  <>
+                    USDT perpetual · {s.timeframes.join(" / ")} ·{" "}
+                    {s.autoEntries
+                      ? data.entrySchedule?.allowed === false
+                        ? "Автоматичні входи очікують торгової сесії"
+                        : "Автоматичні входи увімкнено"
+                      : "Автоматичні входи на паузі"}
+                  </>
+                )}
               </p>
             </div>
+            {tab !== "builder" && (
             <button
               disabled={busy || scan.running}
               onClick={() =>
@@ -950,6 +955,7 @@ export default function App() {
               <RefreshCw size={16} className={scan.running ? "spinning" : ""} />
               {scan.running ? "Скануємо…" : "Сканувати пакет"}
             </button>
+            )}
           </div>
           {data.entrySchedule?.enabled && (
             <div className="notice schedule-banner" role="status">
