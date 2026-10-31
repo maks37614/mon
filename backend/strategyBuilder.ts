@@ -37,6 +37,8 @@ export class StrategyBuilderScanner {
       status: { ...status, running: this.running },
       signals,
       tradingConnected: settings.enabled,
+      autoEntriesEnabled: this.store.get("settings", DEFAULT_SETTINGS).autoEntries,
+      tradingMode: this.store.get("settings", DEFAULT_SETTINGS).mode,
     };
   }
 
