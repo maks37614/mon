@@ -98,22 +98,39 @@ export class HookMarketClient {
       throw new Error('h00k candles have gaps or invalid exchange values');
     return candles;
   }
+  /** Shared fail-closed rule: screening and execution must agree on which books are usable. */
+  private isVerifiedBook(item: Depth | undefined, now: number): item is Depth {
+    const book = item?.book;
+    return Boolean(book && item?.source === 'exchange-websocket' &&
+      book.status === 'LIVE' && book.dataValid === true && book.sequenceGap === false &&
+      Number.isSafeInteger(book.lastReceivedAt) && Number.isSafeInteger(book.timestamp) &&
+      now >= book.lastReceivedAt && now - book.lastReceivedAt <= 5000 &&
+      now >= book.timestamp && now - book.timestamp <= 5000 &&
+      finitePrice(book.bestBid) && finitePrice(book.bestAsk) && book.bestAsk > book.bestBid &&
+      Array.isArray(book.bids) && book.bids.length > 0 &&
+      Array.isArray(book.asks) && book.asks.length > 0 &&
+      [...book.bids, ...book.asks].every(level =>
+        finitePrice(level.price) && finitePrice(level.quantity)));
+  }
+  /** Only scan formation candidates that currently have genuine synchronized depth.
+   * This does not open sockets, add symbols or query the exchange.
+   */
+  async liveBookSymbols(exchange: Exchange): Promise<Set<string>> {
+    const feed = await this.snapshot(true);
+    const now = Date.now();
+    const prefix = exchange + ':futures:';
+    return new Set(feed.density
+      .filter(item => item.instrument.startsWith(prefix) &&
+        /^[A-Z0-9]{3,40}$/.test(item.instrument.slice(prefix.length)) &&
+        this.isVerifiedBook(item, now))
+      .map(item => item.instrument.slice(prefix.length)));
+  }
   async book(exchange: Exchange, symbol: string): Promise<Depth> {
     const feed = await this.snapshot(true);
-    const item = feed.density.find(d => d.instrument === instrument(exchange,symbol));
-    const book = item?.book;
-    const now = Date.now();
-    if (!book || item?.source !== 'exchange-websocket' ||
-      book.status !== 'LIVE' || !book.dataValid || book.sequenceGap ||
-      !Number.isSafeInteger(book.lastReceivedAt) || !Number.isSafeInteger(book.timestamp) ||
-      now - book.lastReceivedAt < 0 || now-book.lastReceivedAt > 5000 ||
-      now - book.timestamp < 0 || now-book.timestamp > 5000 ||
-      !finitePrice(book.bestBid) || !finitePrice(book.bestAsk) ||
-      book.bestAsk <= book.bestBid || !book.bids?.length || !book.asks?.length)
+    const item = feed.density.find(d => d.instrument === instrument(exchange, symbol));
+    if (!this.isVerifiedBook(item, Date.now()))
       throw new Error('No fresh synchronized h00k order book for ' + symbol);
-    if (![...book.bids,...book.asks].every(l =>
-      finitePrice(l.price) && finitePrice(l.quantity))) throw new Error('Invalid h00k depth');
-    return item!;
+    return item;
   }
   async verifiedDensity(exchange: Exchange, symbol: string, side: 'BID'|'ASK', price: number): Promise<boolean> {
     if (!finitePrice(price)) return false;
