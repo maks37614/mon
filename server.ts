@@ -139,6 +139,7 @@ export function createApplication(options: Options) {
       apiPauses: market.status(),
       schedulerMode: options.schedulerMode || "external",
       formationCount: DEFAULT_SETTINGS.formationTypes.length,
+      hookSourceEnabled: Boolean(hookSource),
     });
   });
   app.put(
