@@ -17,6 +17,8 @@ on:
       - "tests/evTestRouting.test.ts"
       - "tests/hookMarketFeed.test.ts"
       - "deploy/install-krystian.sh"
+      - "deploy/update-krystian.sh"
+      - "Dockerfile"
       - ".github/workflows/strategy-builder.yml"
       - "deploy/migrate-evgen-to-mon.sh"
   workflow_dispatch:
@@ -31,7 +33,7 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-      - run: bash -n deploy/migrate-evgen-to-mon.sh deploy/install-krystian.sh
+      - run: bash -n deploy/migrate-evgen-to-mon.sh deploy/install-krystian.sh deploy/update-krystian.sh
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
