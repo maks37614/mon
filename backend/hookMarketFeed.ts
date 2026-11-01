@@ -49,8 +49,15 @@ export class HookMarketClient {
       headers: { Authorization: 'Bearer ' + this.token, Accept: 'application/json' },
       signal: AbortSignal.timeout(8000), redirect: 'error',
     });
-    if (!response.ok) throw new Error('h00k feed unavailable (HTTP ' + response.status + ')');
-    return response.json() as Promise<any>;
+    if (!response.ok) throw new Error('h00k feed unavailable at ' + path.split('?')[0] + ' (HTTP ' + response.status + ')');
+    const contentType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (contentType.includes('html'))
+      throw new Error('h00k ' + path.split('?')[0] + ' returned HTML rather than JSON (HTTP ' + response.status + ')');
+    try {
+      return await response.json() as any;
+    } catch {
+      throw new Error('h00k ' + path.split('?')[0] + ' returned invalid JSON (HTTP ' + response.status + ')');
+    }
   }
   async snapshot(force = false): Promise<Feed> {
     if (!force && this.feed && Date.now()-this.acquiredAt < 2000) return this.feed;
