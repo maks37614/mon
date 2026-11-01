@@ -17,6 +17,7 @@ type BuilderState = {
     running?: boolean; exchange?: string; lastStartedAt?: number; lastFinishedAt?: number;
     lastFullPassAt?: number; cursor?: number; total?: number;
     scanned?: number; failed?: number; detected?: number; error?: string | null;
+    formationSymbols?: number; withoutLiveBook?: number; skippedDepth?: number;
   };
   signals: EdwinSignal[];
   tradingConnected: boolean;
@@ -49,7 +50,10 @@ const fields: {
   { key: "minVolumeRatio", label: "Мінімальна відносна сила обсягу", min: 0.1, max: 3, step: 0.1, hint: "Обсяг свічки відносно середнього за 20 попередніх." },
 ];
 
-export function StrategyBuilder({ onOpenChart }: { onOpenChart: (signal: EdwinSignal) => void }) {
+export function StrategyBuilder({ onOpenChart, hookMode = false }: {
+  onOpenChart: (signal: EdwinSignal) => void;
+  hookMode?: boolean;
+}) {
   const [data, setData] = useState<BuilderState | null>(null);
   const [draft, setDraft] = useState<EdwinSettings | null>(null);
   const [busy, setBusy] = useState(false);
@@ -88,9 +92,11 @@ export function StrategyBuilder({ onOpenChart }: { onOpenChart: (signal: EdwinSi
       <section className="panel">
         <div className="section-heading">
           <div>
-            <div className="eyebrow">КОНСТРУКТОР СТРАТЕГІЙ · №1</div>
+            <div className="eyebrow">{hookMode ? "КРИСТІАН · СТРАТЕГІЯ" : "КОНСТРУКТОР СТРАТЕГІЙ · №1"}</div>
             <h2>{strategy?.name || "Ev-Test"}</h2>
-            <p className="muted">Коли увімкнено — замінює правила входу поточного бота, зберігаючи відбір монет його скрінера.</p>
+            <p className="muted">{hookMode
+              ? "Сигнали лише зі свіжих формацій h00k.top; виконання залежить від реального стакана та підтвердженої щільності."
+              : "Коли увімкнено — замінює правила входу поточного бота, зберігаючи відбір монет його скрінера."}</p>
           </div>
           <span className={"pill " + (data?.settings.enabled ? "positive" : "")}>
             {data?.settings.enabled ? "Пошук увімкнено" : "Вимкнено"}
@@ -128,7 +134,12 @@ export function StrategyBuilder({ onOpenChart }: { onOpenChart: (signal: EdwinSi
         </div>
         <div className="notice">
           <ShieldCheck size={16}/>
-          <span><strong>{data?.tradingMode === "live" ? "Реальний рахунок" : "Віртуальний рахунок"} · {data?.autoEntriesEnabled ? "Авто-входи активні" : "Авто-входи основного бота вимкнені"}.</strong> Ev-Test підміняє точки входу тільки для монет із чинного скрінера формацій; при вимкненні повертаються старі правила. Захисні перевірки, ліміти позицій та супровід відкритих угод залишаються у торговому модулі.</span>
+          <span>
+            <strong>{data?.tradingMode === "live" ? "Реальний рахунок" : "Віртуальний рахунок"} · {data?.autoEntriesEnabled ? "Автоматичні входи увімкнено" : "Автоматичні входи вимкнено"}.</strong>{" "}
+            {hookMode
+              ? "Пошук Ev-Test працює лише з монетами, які h00k.top відстежує за свіжим синхронізованим стаканом. Увімкнення пошуку не вмикає автоматичні ордери."
+              : "Ev-Test підміняє точки входу тільки для монет із чинного скрінера формацій; при вимкненні повертаються старі правила. Захисні перевірки, ліміти позицій та супровід відкритих угод залишаються у торговому модулі."}
+          </span>
         </div>
       </section>
 
@@ -161,15 +172,20 @@ export function StrategyBuilder({ onOpenChart }: { onOpenChart: (signal: EdwinSi
       <section className="panel">
         <div className="section-heading">
           <div>
-            <h2>Автоматичний пошук · {data?.signals.length || 0} свіжих сигналів</h2>
-            <p className="muted">Підтвердження тільки за закритими свічками. Пошук по USDT perpetual на {status.exchange?.toUpperCase() || "вибраній біржі"}.</p>
+            <h2>{hookMode ? "Сигнали Ev-Test" : "Автоматичний пошук"} · {data?.signals.length || 0} свіжих сигналів</h2>
+            <p className="muted">{hookMode
+              ? "Кандидати з h00k.top, свічки 1m/5m, свіжий реальний стакан і перевірені щільності."
+              : `Підтвердження тільки за закритими свічками. Пошук по USDT perpetual на ${status.exchange?.toUpperCase() || "вибраній біржі"}.`}</p>
           </div>
           <span className={"pill " + (status.running ? "positive" : "")}>{status.running ? "Триває" : "Очікує"}</span>
         </div>
         <div className="strategy-builder-status">
           <span>Опрацьовано за цикл: <strong>{status.scanned || 0}</strong></span>
           <span>Знайдено: <strong>{status.detected || 0}</strong></span>
-          <span>Охоплення: <strong>{status.total ? (status.cursor || 0) + " / " + status.total : "—"}</strong></span>
+          <span>{hookMode ? "Стаканів для перевірки" : "Охоплення"}: <strong>{status.total ? (status.cursor || 0) + " / " + status.total : "—"}</strong></span>
+          {hookMode && <span>Монет із формацій: <strong>{status.formationSymbols ?? "—"}</strong></span>}
+          {hookMode && <span>Без актуального стакана: <strong>{status.withoutLiveBook ?? "—"}</strong></span>}
+          {hookMode && <span>Стакан устарів під час перевірки: <strong>{status.skippedDepth ?? 0}</strong></span>
           <span>Останнє сканування: <strong>{when(status.lastFinishedAt)}</strong></span>
           <span>Повний обхід: <strong>{when(status.lastFullPassAt)}</strong></span>
           <span>Помилки: <strong>{status.failed || 0}</strong></span>
@@ -195,17 +211,19 @@ export function StrategyBuilder({ onOpenChart }: { onOpenChart: (signal: EdwinSi
           {!data?.signals.length && <div className="empty">
             <Activity size={26}/>
             <strong>{data?.settings.enabled ? "Поки немає підтверджених сигналів" : "Увімкніть стратегію для пошуку"}</strong>
-            <span>Сигнали з’являються лише після розпізнавання формації на закритій свічці. Повний обхід ринку потребує кількох пакетів.</span>
+            <span>{hookMode
+              ? "Сигнали з’являються лише за наявності свіжих свічок, живого стакана та достатньо стійкої щільності. Відсутність сигналів — не помилка."
+              : "Сигнали з’являються лише після розпізнавання формації на закритій свічці. Повний обхід ринку потребує кількох пакетів."}</span>
           </div>}
         </div>
       </section>
-      <section className="panel">
+      {!hookMode && <section className="panel">
         <div className="section-heading"><h2>Що входить у першу версію</h2></div>
         <div className="strategy-builder-columns">
           <div><h3>Алгоритм шукає</h3><ul>{strategy?.implemented.map((item) => <li key={item}>{item}</li>)}</ul></div>
           <div><h3>Потребує окремої реалізації або ручної оцінки</h3><ul>{strategy?.unsupported.map((item) => <li key={item}>{item}</li>)}</ul></div>
         </div>
-      </section>
+      </section>}
     </div>
   );
 }
