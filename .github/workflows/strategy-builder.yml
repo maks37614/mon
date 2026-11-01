@@ -5,6 +5,8 @@ on:
       - "backend/edwinStrategy.ts"
       - "backend/strategyBuilder.ts"
       - "backend/evTestRouting.ts"
+      - "backend/hookMarketFeed.ts"
+      - "backend/formationState.ts"
       - "backend/trading.ts"
       - "backend/config.ts"
       - "src/components/StrategyBuilder.tsx"
@@ -13,6 +15,8 @@ on:
       - "server.ts"
       - "tests/edwinStrategy.test.ts"
       - "tests/evTestRouting.test.ts"
+      - "tests/hookMarketFeed.test.ts"
+      - "deploy/install-krystian.sh"
       - ".github/workflows/strategy-builder.yml"
       - "deploy/migrate-evgen-to-mon.sh"
   workflow_dispatch:
@@ -27,7 +31,7 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-      - run: bash -n deploy/migrate-evgen-to-mon.sh
+      - run: bash -n deploy/migrate-evgen-to-mon.sh deploy/install-krystian.sh
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
