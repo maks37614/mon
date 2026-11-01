@@ -85,17 +85,33 @@ export class StrategyBuilderScanner {
     const sourceSettings = this.store.get("settings", DEFAULT_SETTINGS);
     const sourceSignals = this.store.get<Signal[]>("signals", [])
       .filter((signal) => formationIsVisible(signal, sourceSettings));
-    const markets = [...new Set(sourceSignals.filter((signal) => signal.exchange === exchange).map((signal) => signal.symbol))].sort();
+    const universe = [...new Set(sourceSignals.filter((signal) => signal.exchange === exchange).map((signal) => signal.symbol))].sort();
+    // h00k observes only a bounded set of formation order books. Never spend candle
+    // requests on uncovered symbols (e.g. LITUSDT when not among the live streams).
+    const depthReady = this.market instanceof HookMarketData && universe.length
+      ? await this.market.hook.liveBookSymbols(exchange) : null;
+    const markets = depthReady
+      ? universe.filter(symbol => depthReady.has(symbol)) : universe;
+    const withoutLiveBook = universe.length - markets.length;
     if (!markets.length) {
       this.store.set("builder:edwin:signals", []);
-      this.store.set("builder:edwin:status", { running: false, exchange, lastStartedAt: this.store.get<any>("builder:edwin:status", {}).lastStartedAt || Date.now(), lastFinishedAt: Date.now(), cursor: 0, total: 0, scanned: 0, failed: 0, detected: 0, error: "Скрінер формацій поки не відібрав монет" });
+      this.store.set("builder:edwin:status", {
+        running: false, exchange,
+        lastStartedAt: this.store.get<any>("builder:edwin:status", {}).lastStartedAt || Date.now(),
+        lastFinishedAt: Date.now(), cursor: 0, total: 0, scanned: 0, failed: 0,
+        detected: 0, source: depthReady ? "h00k-formations" : "formations",
+        formationSymbols: universe.length, withoutLiveBook,
+        error: depthReady
+          ? "Очікуємо живі синхронізовані стакани h00k.top для монет із формацій"
+          : "Скрінер формацій поки не відібрав монет",
+      });
       return;
     }
     const previous = this.store.get<any>("builder:edwin:status", {});
     const cursor = previous.exchange === exchange ? (previous.cursor || 0) % markets.length : 0;
     const count = Math.min(settings.symbolsPerBatch, markets.length);
     const found: EdwinSignal[] = [];
-    let scanned = 0, failed = 0, index = cursor;
+    let scanned = 0, failed = 0, skippedDepth = 0, index = cursor;
     let message = "";
     for (let i = 0; i < count; i++) {
       // A switch-off must stop new API work rather than complete an unwanted batch.
@@ -141,8 +157,16 @@ export class StrategyBuilderScanner {
         }
         scanned++;
       } catch (error: any) {
-        failed++;
-        if (!message) message = String(error?.message || "Помилка даних").slice(0, 180);
+        const reason = String(error?.message || "Помилка даних").slice(0, 180);
+        if (this.market instanceof HookMarketData &&
+            reason.startsWith("No fresh synchronized h00k order book")) {
+          // A live stream can expire between selection and final confirmation.
+          // This is an expected data-quality skip, not an exchange/API failure.
+          skippedDepth++;
+        } else {
+          failed++;
+          if (!message) message = reason;
+        }
         if ((this.market.status()[exchange] || 0) > Date.now()) break;
       }
       index = (index + 1) % markets.length;
@@ -161,7 +185,9 @@ export class StrategyBuilderScanner {
     this.store.set("builder:edwin:status", {
       running: false, exchange, lastStartedAt: previous.lastStartedAt || now, lastFinishedAt: now,
       lastFullPassAt: this.store.get<number | null>("builder:edwin:lastFullPass", null),
-      cursor: index, total: markets.length, scanned, failed, detected: found.length, source: this.market instanceof HookMarketData ? "h00k-formations" : "formations", error: message || null,
+      cursor: index, total: markets.length, scanned, failed, skippedDepth,
+      formationSymbols: universe.length, withoutLiveBook,
+      detected: found.length, source: this.market instanceof HookMarketData ? "h00k-formations" : "formations", error: message || null,
     });
   }
 
