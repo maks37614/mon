@@ -40,7 +40,7 @@ if [[ ! -f /etc/krystian-mon.env ]]; then
   sed -i -e 's|^PORT=3010$|PORT=3011|' -e 's|^DATA_DIR=/var/lib/evgen-mon$|DATA_DIR=/data|' /etc/krystian-mon.env
   read -r -s -p 'HOOK_PAPER_FEED_TOKEN from h00k.top (32+ characters): ' token
   echo
-  if [[ ${#token} -lt 32 || "$token" == *$'\n'* ]]; then
+  if [[ ${#token} -lt 32 || ! "$token" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo 'Invalid source feed token.' >&2; exit 1
   fi
   printf 'MON_MARKET_SOURCE=hook\nHOOK_MARKET_FEED_URL=https://h00k.top\nHOOK_MARKET_FEED_TOKEN=%s\n' "$token" >> /etc/krystian-mon.env
