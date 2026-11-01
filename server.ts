@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import { Store } from "./backend/store";
 import { Auth, Vault, safeEqual } from "./backend/security";
 import { MarketData } from "./backend/market";
+import { HookMarketClient, HookMarketData, HookFormationSource } from "./backend/hookMarketFeed";
 import { Scanner } from "./backend/scanner";
 import { StrategyBuilderScanner } from "./backend/strategyBuilder";
 import { Trading } from "./backend/trading";
@@ -27,6 +28,7 @@ type Options = {
   fetcher?: typeof fetch;
   gatewayFactory?: any;
   weightBudget?: number;
+  hookSource?: { url: string; token: string };
 };
 const route =
   (fn: (req: Request, res: Response) => unknown) =>
@@ -52,11 +54,13 @@ export function createApplication(options: Options) {
     throw new Error("CRON_SECRET має містити щонайменше 32 випадкові символи");
   const store = new Store(options.directory),
     vault = new Vault(store, options.encryptionKey);
-  const market = new MarketData(
-    () => store.get("settings", DEFAULT_SETTINGS),
-    options.fetcher,
-    options.weightBudget,
-  );
+  const hook = options.hookSource
+    ? new HookMarketClient(options.hookSource.url, options.hookSource.token, options.fetcher)
+    : null;
+  const market = hook
+    ? new HookMarketData(() => store.get("settings", DEFAULT_SETTINGS), hook)
+    : new MarketData(() => store.get("settings", DEFAULT_SETTINGS), options.fetcher, options.weightBudget);
+  const hookSource = hook ? new HookFormationSource(store, hook) : null;
   const scanner = new Scanner(store, market),
     gateway = new ExchangeGateway(vault, options.gatewayFactory);
   const trading = new Trading(
@@ -99,7 +103,7 @@ export function createApplication(options: Options) {
       !safeEqual(req.get("authorization") || "", `Bearer ${options.cronSecret}`)
     )
       return res.status(401).json({ error: "Unauthorized" });
-    const result = scanner.start(false, "cron");
+    const result = hookSource ? { accepted: false, reason: "h00k-source-only" } : scanner.start(false, "cron");
     res.status(result.accepted ? 202 : 200).json(result);
   });
   app.use(
@@ -129,6 +133,7 @@ export function createApplication(options: Options) {
   app.get("/api/state", (_req, res) => {
     const state = trading.snapshot();
     state.scanner.running = scanner.running;
+    if (hookSource) state.scanner = { ...state.scanner, source: "h00k.top", ...(store.get("hook:source", {})) };
     res.json({
       ...state,
       apiPauses: market.status(),
@@ -164,7 +169,7 @@ export function createApplication(options: Options) {
     }),
   );
   app.post("/api/scan", (_req, res) => {
-    const result = scanner.start();
+    const result = hookSource ? { accepted: false, reason: "h00k-source-only" } : scanner.start();
     res.status(result.accepted ? 202 : 200).json(result);
   });
   // Isolated strategy builder; never routes its signals to Trading.enter().
@@ -315,13 +320,15 @@ export function createApplication(options: Options) {
     strategyBuilder,
     gateway,
     start() {
+      hookSource?.start();
       trading.start();
       strategyBuilder.startTimer();
-      if (options.schedulerMode === "internal")
+      if (options.schedulerMode === "internal" && !hookSource)
         scheduler = setInterval(() => scanner.start(false, "internal"), 10_000);
     },
     async stop() {
       if (scheduler) clearInterval(scheduler);
+      hookSource?.stop();
       await strategyBuilder.stop();
       await trading.stop();
       if (scanner.task) await scanner.task;
@@ -341,6 +348,10 @@ async function main() {
     liveAllowed: process.env.ENABLE_LIVE_TRADING === "true",
     schedulerMode: process.env.SCHEDULER_MODE || "external",
     weightBudget: Number(process.env.BINANCE_WEIGHT_BUDGET || 1000),
+    hookSource: process.env.MON_MARKET_SOURCE === "hook"
+      ? { url: process.env.HOOK_MARKET_FEED_URL || "https://h00k.top",
+          token: process.env.HOOK_MARKET_FEED_TOKEN || "" }
+      : undefined,
   });
   const host = process.env.HOST || "127.0.0.1",
     port = Number(process.env.PORT || 3010);
