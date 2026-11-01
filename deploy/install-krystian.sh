@@ -95,7 +95,8 @@ if [[ "$healthy" != true ]]; then
 fi
 if systemctl is-active --quiet caddy && [[ -f /etc/caddy/Caddyfile ]]; then
   if ! grep -Eq '^[[:space:]]*krystian[.]h00k[.]top[[:space:]]*[{]' /etc/caddy/Caddyfile; then
-    cp -a /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.before-krystian-$(date +%s)"
+    backup_caddy="/etc/caddy/Caddyfile.before-krystian-$(date +%s)"
+    cp -a /etc/caddy/Caddyfile "$backup_caddy"
     cat >> /etc/caddy/Caddyfile <<'CADDY'
 
 krystian.h00k.top {
@@ -104,7 +105,9 @@ krystian.h00k.top {
 }
 CADDY
     if ! caddy validate --config /etc/caddy/Caddyfile || ! systemctl reload caddy; then
-      echo 'Caddy update failed; restore the saved Caddyfile before using HTTPS.' >&2
+      cp -a "$backup_caddy" /etc/caddy/Caddyfile
+      systemctl reload caddy || true
+      echo 'Caddy update failed; original Caddyfile restored. Krystian still available locally on 3011.' >&2
       exit 1
     fi
   fi
