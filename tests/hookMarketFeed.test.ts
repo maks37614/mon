@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { HookMarketClient, HookFormationSource, HookMarketData } from '../backend/hookMarketFeed';
 import { Store } from '../backend/store';
-import { DEFAULT_SETTINGS } from '../backend/config';
+import { DEFAULT_SETTINGS, FORMATION_ANALYSIS_VERSION } from '../backend/config';
+import { EDWIN_DEFAULTS } from '../backend/edwinStrategy';
+import { StrategyBuilderScanner } from '../backend/strategyBuilder';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -85,4 +87,52 @@ test('hook candle adapter rejects missing, gaps and incompatible contract',async
     contiguous:true,candles:[...candles.slice(0,30),...candles.slice(31)],
   }));
   await assert.rejects(corrupt.candles('binance','BTCUSDT','1m',60),/gaps/);
+});
+
+test('live book universe excludes untracked or stale formation symbols', async () => {
+  const now = Date.now();
+  const baseline = makeFeed(now);
+  const stale = {
+    ...baseline.density[0], instrument:'binance:futures:LITUSDT',
+    book:{...baseline.density[0].book, lastReceivedAt: now-10_000},
+  };
+  const otherExchange = {
+    ...baseline.density[0], instrument:'bybit:futures:SOLUSDT',
+  };
+  const h = client(() => makeFeed(now, {
+    density:[baseline.density[0],stale,otherExchange],
+  }));
+  const live = await h.liveBookSymbols('binance');
+  assert.deepEqual([...live],['BTCUSDT']);
+  await assert.rejects(h.book('binance','LITUSDT'),/No fresh synchronized/);
+});
+
+test('Ev-Test skips LITUSDT without live h00k depth before any candle requests', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(),'hook-scan-'));
+  const store = new Store(dir);
+  try {
+    const now = Date.now();
+    const h = client(() => makeFeed(now));
+    const market = new HookMarketData(() => DEFAULT_SETTINGS, h);
+    let candleRequests = 0;
+    market.getCandles = async () => { candleRequests++; throw new Error('Unexpected candles request'); };
+    store.set('signals',[{
+      id: 'hook:binance:LITUSDT:1m:form1', exchange:'binance',symbol:'LITUSDT',
+      timeframe:'1m',formation:'Double Bottom',direction:'LONG',
+      entryPrice:0,currentPrice:0,stopLoss:0,takeProfit:0,
+      confidence:85,analysisVersion:FORMATION_ANALYSIS_VERSION,status:'watching',
+      candleAt:now-1000,detectedAt:now-1000,description:'source-only',
+    }]);
+    store.set('builder:edwin:config',{ ...EDWIN_DEFAULTS, enabled:true });
+    const scanner = new StrategyBuilderScanner(store,market,()=> 'binance');
+    assert.equal(scanner.start(true).accepted,true);
+    await scanner.task;
+    const status = store.get<any>('builder:edwin:status',{});
+    assert.equal(status.formationSymbols,1);
+    assert.equal(status.withoutLiveBook,1);
+    assert.equal(status.total,0);
+    assert.equal(status.failed,0);
+    assert.equal(candleRequests,0);
+    assert.deepEqual(store.get('builder:edwin:signals',[]),[]);
+  } finally { store.close(); rmSync(dir,{recursive:true,force:true}); }
 });
