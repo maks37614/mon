@@ -508,6 +508,10 @@ export class Trading {
     // Quotes, account reads and exchange preparation may span the session boundary.
     if (isEvTest !== this.evTestEnabled() || (isEvTest && !this.evTestCandidates(this.settings()).some(candidate => candidate.id === signal.id)))
       throw new Error("Ev-Test: умови або джерело монети змінилися до відправлення ордера");
+    if (isEvTest && this.market instanceof HookMarketData &&
+      !(await this.market.hook.verifiedDensity(s.exchange, signal.symbol,
+        signal.direction === 'LONG' ? 'BID' : 'ASK', signal.entryPrice)))
+      throw new Error("Ev-Test: щільність змінилася до виконання ордера");
     if (Date.now() - signal.candleAt > s.maxSignalAgeSeconds * 1000) throw new Error("Сигнал застарів під час підготовки виконання");
     if (automatic && !tradingScheduleState(s.tradingSchedule).allowed)
       throw new Error("Торгова сесія завершилася під час підготовки входу");
