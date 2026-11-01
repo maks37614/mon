@@ -185,7 +185,7 @@ export function StrategyBuilder({ onOpenChart, hookMode = false }: {
           <span>{hookMode ? "Стаканів для перевірки" : "Охоплення"}: <strong>{status.total ? (status.cursor || 0) + " / " + status.total : "—"}</strong></span>
           {hookMode && <span>Монет із формацій: <strong>{status.formationSymbols ?? "—"}</strong></span>}
           {hookMode && <span>Без актуального стакана: <strong>{status.withoutLiveBook ?? "—"}</strong></span>}
-          {hookMode && <span>Стакан устарів під час перевірки: <strong>{status.skippedDepth ?? 0}</strong></span>
+          {hookMode && <span>Стакан застарів під час перевірки: <strong>{status.skippedDepth ?? 0}</strong></span>}
           <span>Останнє сканування: <strong>{when(status.lastFinishedAt)}</strong></span>
           <span>Повний обхід: <strong>{when(status.lastFullPassAt)}</strong></span>
           <span>Помилки: <strong>{status.failed || 0}</strong></span>
