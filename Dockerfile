@@ -22,5 +22,5 @@ RUN mkdir /data && chown node:node /data
 USER node
 EXPOSE 3010
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s \
-    CMD node -e "fetch('http://127.0.0.1:3010/healthz').then(r=>r.json()).then(v=>process.exit(v.ok&&v.app==='mon'?0:1)).catch(()=>process.exit(1))"
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3010)+'/healthz').then(r=>r.json()).then(v=>process.exit(v.ok&&v.app==='mon'?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "--max-old-space-size=384", "build/server.mjs"]
