@@ -12,6 +12,7 @@ import {
 import { Mutex, type Store } from "./store";
 import { formationIsVisible, signalAllowsEntry } from "./formationState";
 import { EV_TEST_ID, selectEvTestCandidates } from "./evTestRouting";
+import { HookMarketData } from "./hookMarketFeed";
 import { EDWIN_DEFAULTS, type EdwinSettings, type EdwinSignal } from "./edwinStrategy";
 import { tradingScheduleState } from "./tradingSchedule";
 import type { MarketData } from "./market";
@@ -367,6 +368,10 @@ export class Trading {
     if (isEvTest !== this.evTestEnabled()) throw new Error("Стратегія перемкнулася; сигнал більше не активний");
     if (isEvTest && !this.evTestCandidates(s).some((candidate) => candidate.id === signal.id))
       throw new Error("Ev-Test: сигнал зник з актуального списку формацій або застарів");
+    if (isEvTest && this.market instanceof HookMarketData &&
+      !(await this.market.hook.verifiedDensity(s.exchange, signal.symbol,
+        signal.direction === 'LONG' ? 'BID' : 'ASK', signal.entryPrice)))
+      throw new Error("Ev-Test: підтверджена жива щільність h00k.top недоступна");
     if (isEvTest) {
       const risk = this.evTestRiskSettings();
       const today = (at: number) => new Intl.DateTimeFormat("en-CA", {
