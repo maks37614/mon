@@ -932,9 +932,11 @@ export default function App() {
         <main className="main-content">
           <div className="page-heading">
             <div>
-              <div className="eyebrow">
-                {live ? "РЕАЛЬНИЙ РАХУНОК" : "ТЕСТУВАННЯ НА РЕАЛЬНОМУ РИНКУ"}
-              </div>
+              {(!hookMode || live) && (
+                <div className="eyebrow">
+                  {live ? "РЕАЛЬНИЙ РАХУНОК" : "ТЕСТУВАННЯ НА РЕАЛЬНОМУ РИНКУ"}
+                </div>
+              )}
               <h1>
                 {tab === "builder"
                   ? hookMode ? "Ev-Test · сигнали" : "Конструктор стратегій"
@@ -949,7 +951,7 @@ export default function App() {
               <p className="muted">
                 {tab === "builder" ? (hookMode ? "Стратегія 1m / 5m · формації та реальний стакан із h00k.top" : "Окремий сканер 1m / 5m · без автоматичних ордерів") : (
                   <>
-                    USDT perpetual · {hookMode ? "Ev-Test 1m / 5m" : s.timeframes.join(" / ")} ·{" "}
+                    USDT perpetual · {hookMode ? (live ? "Ev-Test 1m / 5m · Live" : "Ev-Test 1m / 5m · Paper") : s.timeframes.join(" / ")} ·{" "}
                     {s.autoEntries
                       ? data.entrySchedule?.allowed === false
                         ? "Автоматичні входи очікують торгової сесії"
@@ -1065,7 +1067,7 @@ export default function App() {
               <div className="metrics">
                 {[
                   {
-                    label: live ? "Баланс біржі" : "Віртуальний баланс",
+                    label: hookMode && !live ? "Баланс" : live ? "Баланс біржі" : "Віртуальний баланс",
                     value: money(data.stats.balance),
                     unit: "USDT",
                     Icon: CircleDollarSign,
