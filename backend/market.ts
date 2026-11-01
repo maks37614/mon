@@ -76,8 +76,19 @@ export class MarketData {
       );
     }
     if (!response.ok)
-      throw new Error(`API ${exchange}: HTTP ${response.status}`);
-    const data = await response.json();
+      throw new Error(`API ${exchange} ${pathname}: HTTP ${response.status}`);
+    // VPS gateways and exchange anti-abuse pages may return HTML with HTTP 200.
+    // Never treat that as valid market data, never print third-party page bodies,
+    // and name the failing endpoint so paper-position monitoring is diagnosable.
+    const contentType = (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    if (contentType.includes("html"))
+      throw new Error(`API ${exchange} ${pathname}: HTTP ${response.status} повернув HTML замість JSON (Content-Type: ${contentType}); перевірте доступність біржі з VPS`);
+    let data: any;
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error(`API ${exchange} ${pathname}: HTTP ${response.status}, некоректна JSON-відповідь (Content-Type: ${contentType || "відсутній"})`);
+    }
     if (exchange === "bybit" && data.retCode !== 0) {
       if ([10006, 10018].includes(data.retCode))
         this.blocked.set(exchange, Date.now() + 60_000);
