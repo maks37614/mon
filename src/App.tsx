@@ -494,6 +494,14 @@ function SettingsPanel({
             {data.hookSourceEnabled ? "Лише підтверджені сигнали Ev-Test" : "Лише підтверджені формації"}
           </label>
         </div>
+        {data.hookSourceEnabled && (
+          <p className="muted">
+            «Автоматичне відкриття угод» дозволяє боту самостійно входити за Ev-Test.
+            «Лише підтверджені сигнали» не означає ручне погодження: підтвердження
+            виконує алгоритм за закритими свічками та перевіреною ліквідністю.
+            Почніть із вимкнених автовходів у віртуальному режимі.
+          </p>
+        )}
         <TradingScheduleSettings value={form.tradingSchedule}
           onChange={tradingSchedule => setForm({ ...form, tradingSchedule })} />
         <label>
