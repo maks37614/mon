@@ -2,6 +2,7 @@ import { DEFAULT_SETTINGS, type Exchange, type Signal } from "./config";
 import { formationIsVisible } from "./formationState";
 import type { Store } from "./store";
 import type { MarketData } from "./market";
+import { HookMarketData } from "./hookMarketFeed";
 import {
   EDWIN_DEFAULTS, EDWIN_STRATEGY, detectEdwinSetups, validateEdwinSettings,
   type EdwinSettings, type EdwinSignal,
@@ -125,6 +126,11 @@ export class StrategyBuilderScanner {
               const lookback = history.slice(0, -6);
               const meanRange = lookback.reduce((sum, row) => sum + ((row.high - row.low) / row.close) * 100, 0) / Math.max(1, lookback.length);
               for (const signal of latest) {
+                // In Krystian mode, real synchronized exchange liquidity is mandatory.
+                // A 15s+ persistent visible wall must support the intended direction.
+                if (this.market instanceof HookMarketData &&
+                  !(await this.market.hook.verifiedDensity(exchange, symbol,
+                    signal.direction === 'LONG' ? 'BID' : 'ASK', signal.entryPrice))) continue;
                 const delta = signal.direction === "LONG" ? "купівлю" : "продаж";
                 signal.description += " | Спред " + spreadPercent.toFixed(3) + "%; середній діапазон 5m за ~3 дні " +
                   meanRange.toFixed(2) + "%; напрям " + delta + ".";
@@ -155,7 +161,7 @@ export class StrategyBuilderScanner {
     this.store.set("builder:edwin:status", {
       running: false, exchange, lastStartedAt: previous.lastStartedAt || now, lastFinishedAt: now,
       lastFullPassAt: this.store.get<number | null>("builder:edwin:lastFullPass", null),
-      cursor: index, total: markets.length, scanned, failed, detected: found.length, source: "formations", error: message || null,
+      cursor: index, total: markets.length, scanned, failed, detected: found.length, source: this.market instanceof HookMarketData ? "h00k-formations" : "formations", error: message || null,
     });
   }
 
