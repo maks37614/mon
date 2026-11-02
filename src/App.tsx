@@ -801,6 +801,8 @@ export default function App() {
       takeProfit: item.takeProfit,
       stopLoss: item.stopLoss,
       entryTimestamp: item.openedAt || item.candleAt,
+      exitPrice: historical ? item.exitPrice : undefined,
+      exitTimestamp: historical ? item.closedAt : undefined,
       focusAt: historical ? item.openedAt : undefined,
       formationName: item.formation || item.formationName,
       initialTimeframe: TIMEFRAMES.includes(timeframe) ? timeframe : "1m",
@@ -1579,6 +1581,18 @@ export default function App() {
                 Стоп (SL) <strong>{chart.stopLoss ? price(chart.stopLoss) : "—"}</strong>
               </span>
             </div>
+            {chart.historical && chart.exitPrice && (
+              <div className="trade-levels" aria-label="Фактичний вихід угоди">
+                <span className="entry-level" style={{ color: '#fbbf24', borderColor: '#b45309' }}>
+                  Вихід <strong>{price(chart.exitPrice)}</strong>
+                </span>
+                <span className="muted">
+                  {chart.exitTimestamp
+                    ? new Date(chart.exitTimestamp).toLocaleString("uk-UA", { timeZone: "Europe/Warsaw" })
+                    : "Час закриття невідомий"}
+                </span>
+              </div>
+            )}
             {chart.historical && (!chart.takeProfit || !chart.stopLoss) && (
               <p className="muted chart-history-note">
                 У старому записі угоди ціль і стоп не збережені. Для нових угод
@@ -1594,9 +1608,12 @@ export default function App() {
               takeProfit={chart.takeProfit}
               direction={chart.direction}
               entryTimestamp={chart.entryTimestamp}
+              exitPrice={chart.exitPrice}
+              exitTimestamp={chart.exitTimestamp}
               focusAt={chart.focusAt}
               formationName={chart.formationName}
               initialTimeframe={chart.initialTimeframe}
+              verifiedOnly={hookMode}
               height={520}
             />
           </div>
