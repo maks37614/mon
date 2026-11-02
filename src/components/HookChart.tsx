@@ -99,6 +99,7 @@ export const HookChart: React.FC<HookChartProps> = ({
   const [candles, setCandles] = useState<Candle[]>([]);
   const [activeTool, setActiveTool] = useState<string>('cursor');
   const [dataError, setDataError] = useState('');
+  const [chartSource, setChartSource] = useState<string>('h00k-verified');
   const historical = Number.isFinite(focusAt) && (focusAt ?? 0) > 0;
   const entryInLoadedWindow = !historical || !entryTimestamp || !candles.length ||
     (entryTimestamp >= candles[0].t &&
@@ -148,10 +149,11 @@ export const HookChart: React.FC<HookChartProps> = ({
     abortControllerRef.current = controller;
     try {
       const query = new URLSearchParams({ symbol, exchange, interval: timeframe, limit: '300' });
-      // The protected h00k source has no historical endTime/replay endpoint.
-      // Show genuine latest closed candles instead of requesting unsupported data.
-      if (historical && !verifiedOnly) {
-        query.set('endTime', String(Math.min(Date.now(), focusAt! + tfMs(timeframe) * 90)));
+      // For recorded trades use a bounded chart-only exchange history if h00k
+      // no longer retains their fresh formation. No replay data is fabricated.
+      if (historical) {
+        const anchor = Math.max(focusAt!, exitTimestamp || focusAt!);
+        query.set('endTime', String(Math.min(Date.now(), anchor + tfMs(timeframe) * 20)));
       }
       const res = await fetch(
         `/api/market/klines?${query}`,
@@ -163,6 +165,7 @@ export const HookChart: React.FC<HookChartProps> = ({
         throw new Error(error.error || `Не вдалося завантажити свічки (HTTP ${res.status})`);
       }
       const raw = await res.json();
+      setChartSource(res.headers.get('x-chart-source') || 'h00k-verified');
       if (isDisposedRef.current || controller.signal.aborted) return;
       if (!Array.isArray(raw) || !raw.length) {
         throw new Error('Для цього контракту та періоду свічки відсутні');
@@ -194,7 +197,7 @@ export const HookChart: React.FC<HookChartProps> = ({
         setIsLoading(false);
       }
     }
-  }, [symbol, timeframe, exchange, focusAt, historical, verifiedOnly]);
+  }, [symbol, timeframe, exchange, focusAt, historical, verifiedOnly, exitTimestamp]);
 
   // Initial fetch on symbol / timeframe change
   useEffect(() => {
@@ -255,7 +258,7 @@ export const HookChart: React.FC<HookChartProps> = ({
 
           {/* Formation name */}
           {formationName && (
-            <span className="text-slate-400 text-[11px] hidden md:inline truncate max-w-[150px]">
+            <span className="text-slate-400 text-[11px] truncate max-w-[180px]">
               {formationName}
             </span>
           )}
@@ -402,7 +405,10 @@ export const HookChart: React.FC<HookChartProps> = ({
 
       {verifiedOnly && (
         <div className="px-3 py-1 text-[10px] text-slate-400 border-b border-slate-800 bg-[#0e1319]">
-          Реальні закриті свічки h00k.top · Вхід / TP / SL — рівні алгоритму
+          {chartSource === 'exchange-readonly'
+            ? 'Реальні закриті свічки біржі для перегляду угоди (не для сигналів)'
+            : 'Перевірені закриті свічки h00k.top'}
+          {' · '}Вхід / TP / SL — рівні алгоритму
           {historical && !entryInLoadedWindow && (
             <span className="ml-2 text-amber-300">
               Вхід був раніше доступних свічок; його час не відображається.
