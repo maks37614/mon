@@ -1326,8 +1326,6 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     const d = drag.current;
     if (!d) return;
 
-    if (tool !== 'cursor') return;
-
     if (d.kind === 'pinch' && pointers.current.size >= 2) {
       const a = [...pointers.current.values()];
       const dist = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y);
@@ -1347,6 +1345,8 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
       });
       return;
     }
+
+    if (tool !== 'cursor') return;
 
     if (d.kind === 'plot') {
       const dx = z.x - d.x;
@@ -1448,6 +1448,26 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     zoomX(factor, anchor, g);
   };
 
+  const handleKeyboard = (e: React.KeyboardEvent<HTMLCanvasElement>) => {
+    if (tool !== 'cursor') return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      panButton(e.key === 'ArrowLeft' ? 12 : -12);
+    } else if (e.key === '+' || e.key === '=') {
+      e.preventDefault();
+      zoomButton(1.2);
+    } else if (e.key === '-') {
+      e.preventDefault();
+      zoomButton(1 / 1.2);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      fitAllHistory();
+    } else if (e.key === '0') {
+      e.preventDefault();
+      reset();
+    }
+  };
+
   const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const g = geometry();
     if (!g) return;
@@ -1511,6 +1531,10 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
             </div>
             {zoomPanelOpen && (
               <div className="scaleTools">
+                <button type="button" title="Раніше: пересунути графік до старіших свічок" aria-label="Показати старіші свічки"
+                  onClick={() => panButton(12)}>←</button>
+                <button type="button" title="Пізніше: пересунути графік до новіших свічок" aria-label="Показати новіші свічки"
+                  onClick={() => panButton(-12)}>→</button>
                 <button
                   title="Збільшити масштаб"
                   onClick={() => zoomButton(1.2)}
@@ -1571,12 +1595,17 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
           {/* HTML5 Canvas Surface */}
           <canvas
             ref={ref}
+            tabIndex={0}
+            role="application"
+            aria-label={`Графік ${symbol}: перетягуйте мишею або пальцем, двома пальцями змінюйте масштаб, стрілки вліво-вправо для навігації`}
+            onKeyDown={handleKeyboard}
             onClick={handleClick}
             onWheel={handleWheel}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerUp}
+            onLostPointerCapture={handlePointerUp}
             onPointerLeave={() => {
               mouseRef.current = null;
               scheduleDraw();
