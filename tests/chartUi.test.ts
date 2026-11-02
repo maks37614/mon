@@ -25,7 +25,7 @@ test('Krystian chart is native HookChart only, with real 1m/5m controls and trad
   assert.match(html, /Вхід: 78330\.1/);
   assert.match(html, /TP: 80288\.3525/);
   assert.match(html, /SL: 77938\.4495/);
-  assert.match(html, /Реальні закриті свічки h00k\.top/);
+  assert.match(html, /Перевірені закриті свічки h00k\.top/);
 });
 
 test('Historical chart keeps the actual exit instead of inferring a candle close', () => {
