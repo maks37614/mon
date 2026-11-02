@@ -1282,6 +1282,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     // Capture the original finger/mouse pointer even when it travels outside canvas.
     // touch-action:none on canvas prevents browser page-scroll/pinch stealing it.
     e.currentTarget.setPointerCapture(e.pointerId);
+    if (tool === 'cursor') e.currentTarget.classList.add('is-panning');
     if (e.pointerType === 'touch') e.preventDefault();
     pointers.current.set(e.pointerId, { x: z.x, y: z.y });
 
@@ -1391,11 +1392,13 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!pointers.current.has(e.pointerId)) return;
     pointers.current.delete(e.pointerId);
     if (e.currentTarget.hasPointerCapture(e.pointerId))
       e.currentTarget.releasePointerCapture(e.pointerId);
     if (!pointers.current.size) {
       drag.current = null;
+      e.currentTarget.classList.remove('is-panning');
     } else if (pointers.current.size === 1) {
       // When a two-finger pinch ends, the remaining finger can immediately
       // resume panning, without a second tap.
@@ -1597,6 +1600,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
             ref={ref}
             tabIndex={0}
             role="application"
+            style={{ cursor: tool === 'cursor' ? 'grab' : 'crosshair' }}
             aria-label={`Графік ${symbol}: перетягуйте мишею або пальцем, двома пальцями змінюйте масштаб, стрілки вліво-вправо для навігації`}
             onKeyDown={handleKeyboard}
             onClick={handleClick}
