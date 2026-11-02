@@ -228,7 +228,7 @@ export const HookChart: React.FC<HookChartProps> = ({
 
   return (
     <div
-      className={`rounded-xl border border-slate-800 bg-[#090d16] overflow-hidden flex flex-col font-sans transition-all ${
+      className={`krystianTradeChart rounded-xl border border-slate-800 bg-[#090d16] overflow-hidden flex flex-col font-sans transition-all ${
         isExpanded ? 'fixed inset-3 z-50 shadow-2xl border-cyan-500/50 bg-[#090d16]' : ''
       }`}
       style={{ height: isExpanded ? 'calc(100vh - 24px)' : `${height}px` }}
@@ -416,6 +416,9 @@ export const HookChart: React.FC<HookChartProps> = ({
           )}
         </div>
       )}
+      <div className="px-3 py-1 text-[10px] text-slate-400 border-b border-slate-800 bg-[#0e1319]">
+        Навігація: перетягуйте графік пальцем або мишею · два пальці — масштаб · стрілки — раніше / пізніше
+      </div>
       {/* Native HookChart showing real candles and exact position levels */}
       <div className="flex-1 relative w-full min-h-[180px] overflow-hidden bg-[#131722]">
             {isLoading && !candles.length && (
@@ -449,6 +452,7 @@ export const HookChart: React.FC<HookChartProps> = ({
               formationName={formationName}
               tool={activeTool}
               showVolumes={true}
+              showAutoLevels={false}
               candleLongColor="#0ECB81"
               candleShortColor="#F6465D"
             />
