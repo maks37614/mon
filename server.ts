@@ -279,7 +279,9 @@ export function createApplication(options: Options) {
         String(req.query.symbol || "BTCUSDT"),
         String(req.query.interval || "1m"),
         Number(req.query.limit || 160),
-        false,
+        // The private h00k feed supplies only real, finalized candles.
+        // Other market modes keep their existing live-candle behavior.
+        market instanceof HookMarketData,
         req.query.endTime === undefined ? undefined : Number(req.query.endTime),
       );
       res.json(data);
