@@ -1,7 +1,9 @@
 import type { Exchange, Candle } from './config';
 
 // Read-only chart data for symbols already present in the user's Paper book.
-// NEVER use these candles in Ev-Test signals, liquidity checks or execution.
+// NEVER use these candles for LIVE Ev-Test signals, density checks or execution.
+// Historical read-only candle research/backtesting may call this adapter, with
+// clear limitations: OHLC cannot reconstruct historical order-book liquidity.
 export async function fetchTradeChartCandles(
   exchange: Exchange, symbol: string, timeframe: string, limit: number,
   endTime?: number, fetcher: typeof fetch = fetch,
