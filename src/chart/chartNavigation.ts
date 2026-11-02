@@ -5,7 +5,7 @@
 export type ChartPanViewport = {
   barWidth: number;
   rightOffset: number;
-  fitAll: boolean;
+  fitAll?: boolean;
 };
 
 export const MIN_BAR_WIDTH = 0.5;
