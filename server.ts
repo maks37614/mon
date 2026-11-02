@@ -11,6 +11,8 @@ import { Auth, Vault, safeEqual } from "./backend/security";
 import { MarketData } from "./backend/market";
 import { HookMarketClient, HookMarketData, HookFormationSource } from "./backend/hookMarketFeed";
 import { fetchTradeChartCandles } from "./backend/tradeChartCandles";
+import { loadBacktestCandles, runCandleBacktest, validateBacktestInput } from "./backend/backtest";
+import { EDWIN_DEFAULTS, type EdwinSettings } from "./backend/edwinStrategy";
 import { Scanner } from "./backend/scanner";
 import { StrategyBuilderScanner } from "./backend/strategyBuilder";
 import { Trading } from "./backend/trading";
@@ -175,6 +177,30 @@ export function createApplication(options: Options) {
     res.status(result.accepted ? 202 : 200).json(result);
   });
   // Isolated strategy builder; never routes its signals to Trading.enter().
+  // Isolated read-only candle backtest: no Trading/Paper calls and no state writes.
+  // Only one explicitly selected instrument from the bounded Krystian feed list.
+  let backtestRunning = false;
+  app.get("/api/backtest", route(async (req, res) => {
+    if (!hook) return res.status(404).json({ error: "Бектест доступний тільки в Krystian" });
+    if (backtestRunning)
+      return res.status(429).json({ error: "Попередній бектест ще виконується" });
+    const input = validateBacktestInput(req.query);
+    const supported: Record<Exchange, string[]> = {
+      binance: ["BTCUSDT","ETHUSDT","SOLUSDT","ZECUSDT","HYPEUSDT","ESPORTSUSDT"],
+      bybit: ["BTCUSDT","ETHUSDT"],
+    };
+    if (!supported[input.exchange].includes(input.symbol))
+      throw new Error("Бектест доступний лише для відстежуваних інструментів Krystian");
+    backtestRunning = true;
+    try {
+      const rows = await loadBacktestCandles(input, options.fetcher);
+      const strategy = store.get<EdwinSettings>("builder:edwin:config", EDWIN_DEFAULTS);
+      res.setHeader("Cache-Control", "no-store");
+      return res.json(runCandleBacktest(rows,input,strategy));
+    } finally {
+      backtestRunning = false;
+    }
+  }));
   app.get("/api/strategy-builder", (_req, res) => res.json(strategyBuilder.snapshot()));
   app.put("/api/strategy-builder", route((req, res) => {
     const { liveAcknowledged, ...configuration } = req.body || {};
