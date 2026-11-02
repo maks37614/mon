@@ -10,6 +10,7 @@ import { Store } from "./backend/store";
 import { Auth, Vault, safeEqual } from "./backend/security";
 import { MarketData } from "./backend/market";
 import { HookMarketClient, HookMarketData, HookFormationSource } from "./backend/hookMarketFeed";
+import { fetchTradeChartCandles } from "./backend/tradeChartCandles";
 import { Scanner } from "./backend/scanner";
 import { StrategyBuilderScanner } from "./backend/strategyBuilder";
 import { Trading } from "./backend/trading";
@@ -274,17 +275,33 @@ export function createApplication(options: Options) {
       const exchange = req.query.exchange ?? s.exchange;
       if (exchange !== "binance" && exchange !== "bybit")
         throw new Error("Невідома біржа графіка");
-      const data = await market.getCandles(
-        exchange,
-        String(req.query.symbol || "BTCUSDT"),
-        String(req.query.interval || "1m"),
-        Number(req.query.limit || 160),
-        // The private h00k feed supplies only real, finalized candles.
-        // Other market modes keep their existing live-candle behavior.
-        market instanceof HookMarketData,
-        req.query.endTime === undefined ? undefined : Number(req.query.endTime),
-      );
-      res.json(data);
+      const symbol = String(req.query.symbol || "BTCUSDT");
+      const timeframe = String(req.query.interval || "1m");
+      const limit = Number(req.query.limit || 160);
+      const endTime = req.query.endTime === undefined ? undefined : Number(req.query.endTime);
+      try {
+        const data = await market.getCandles(
+          exchange, symbol, timeframe, limit,
+          market instanceof HookMarketData, endTime,
+        );
+        res.setHeader("X-Chart-Source", market instanceof HookMarketData ? "h00k-verified" : "exchange");
+        return res.json(data);
+      } catch (feedError) {
+        // This exception is display-only. The h00k trading/formation feed is
+        // never replaced: its verified density, entry and risk gates stay intact.
+        if (!(market instanceof HookMarketData)) throw feedError;
+        const paper = store.get<{positions: {exchange: string; symbol: string}[];
+          history: {exchange: string; symbol: string}[]}>(
+          "book:paper", {positions: [], history: []});
+        const knownTrade = [...paper.positions, ...paper.history]
+          .some(p => p.exchange === exchange && p.symbol === symbol);
+        if (!knownTrade) throw feedError;
+        const data = await fetchTradeChartCandles(
+          exchange, symbol, timeframe, limit, endTime, options.fetcher,
+        );
+        res.setHeader("X-Chart-Source", "exchange-readonly");
+        return res.json(data);
+      }
     }),
   );
   app.use("/api", (_req, res) =>
