@@ -72,6 +72,7 @@ export async function loadBacktestCandles(input: BacktestInput, fetcher: typeof 
  */
 export function runCandleBacktest(
   rows: Candle[], input: BacktestInput, strategy: EdwinSettings,
+  findSetups: typeof detectEdwinSetups = detectEdwinSetups,
 ) {
   const tfMs = input.timeframe === '1m' ? 60_000 : 300_000;
   if (rows.length !== input.bars || rows.length < 120 ||
@@ -120,6 +121,7 @@ export function runCandleBacktest(
   // Begin after enough bars to initialize all detector windows.
   for (let i = 120; i < rows.length; i++) {
     const bar = rows[i];
+    const occupiedAtBarOpen = active !== null;
     if (active) {
       const a = active;
       const dir = a.signal.direction;
@@ -138,10 +140,12 @@ export function runCandleBacktest(
       }
     }
 
-    if (active || i === rows.length - 1) continue;
+    // A position liquidated/closed during this bar must not free capacity for
+    // a new fill at the *already elapsed* open of the very same bar.
+    if (occupiedAtBarOpen || active || i === rows.length - 1) continue;
     // At bar i, ONLY data through closed bar i-1 is visible.
     const prior = rows.slice(0,i);
-    const found = detectEdwinSetups(input.exchange,input.symbol,
+    const found = findSetups(input.exchange,input.symbol,
       input.timeframe === '1m' ? prior : [],
       input.timeframe === '5m' ? prior : [],
       strategy).filter(x => x.timeframe === input.timeframe);
