@@ -1277,23 +1277,30 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    e.currentTarget.setPointerCapture(e.pointerId);
     const z = point(e);
     if (!z) return;
+    // Capture the original finger/mouse pointer even when it travels outside canvas.
+    // touch-action:none on canvas prevents browser page-scroll/pinch stealing it.
+    e.currentTarget.setPointerCapture(e.pointerId);
+    if (e.pointerType === 'touch') e.preventDefault();
     pointers.current.set(e.pointerId, { x: z.x, y: z.y });
 
     if (pointers.current.size === 2) {
       const a = [...pointers.current.values()];
+      const midX = (a[0].x + a[1].x) / 2;
       const midY = (a[0].y + a[1].y) / 2;
+      const g = z.g;
       drag.current = {
         kind: 'pinch',
-        dist: Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y),
-        bar: vp.fitAll ? Math.max(0.001, z.g.step) : vp.barWidth,
-        baseRange: vp.autoY
-          ? z.g.hi - z.g.lo
-          : vp.manualRange || z.g.hi - z.g.lo,
-        anchorY: midY,
-        anchorPrice: z.g.p(Math.max(0, Math.min(z.g.plotH, midY))),
+        dist: Math.max(1, Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y)),
+        baseVp: { ...vp },
+        baseStep: g.step,
+        startX: midX,
+        startY: midY,
+        baseRange: vp.autoY ? g.hi - g.lo : vp.manualRange || g.hi - g.lo,
+        anchorPrice: g.p(Math.max(0, Math.min(g.plotH, midY))),
+        plotW: g.plotW,
+        plotH: g.plotH,
       };
       return;
     }
@@ -1324,42 +1331,42 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     if (d.kind === 'pinch' && pointers.current.size >= 2) {
       const a = [...pointers.current.values()];
       const dist = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y);
-      const ratio = Math.max(0.35, Math.min(3.2, dist / (d.dist || 1)));
-      const anchorY = Math.max(0, Math.min(z.g.plotH, d.anchorY ?? z.g.plotH / 2));
-      const nr = Math.max(1e-9, (d.baseRange || z.g.hi - z.g.lo) / ratio);
-      const anchorPrice = d.anchorPrice ?? z.g.p(anchorY);
-      const anchorRatio = anchorY / Math.max(1, z.g.plotH) - 0.5;
-      const nc = anchorPrice + anchorRatio * nr;
-      setVp((v) => ({
-        ...v,
-        fitAll: false,
-        barWidth: Math.max(0.12, Math.min(34, d.bar * ratio)),
+      const ratio = Math.max(0.3, Math.min(4, dist / d.dist));
+      const midX = (a[0].x + a[1].x) / 2;
+      const midY = (a[0].y + a[1].y) / 2;
+      const nextHorizontal = transformChartX(d.baseVp, d.baseStep, ratio,
+        d.startX, midX, d.plotW, rightPadding);
+      const nr = Math.max(1e-9, d.baseRange / ratio);
+      const anchorY = Math.max(0, Math.min(d.plotH, midY));
+      const center = d.anchorPrice + (anchorY / Math.max(1, d.plotH) - 0.5) * nr;
+      setVp({
+        ...nextHorizontal,
         autoY: false,
         manualRange: nr,
-        manualCenter: nc,
-      }));
+        manualCenter: center,
+      });
       return;
     }
 
     if (d.kind === 'plot') {
       const dx = z.x - d.x;
       const dy = z.y - d.y;
-      const nextOffset =
-        d.vp.rightOffset +
-        dx / Math.max(0.001, d.vp.fitAll ? d.g.step : d.vp.barWidth);
-      const movedY = Math.abs(dy) > 1.5 || !d.vp.autoY;
-      if (movedY) {
+      // A normal sideways swipe must NOT silently change the price scale due
+      // to small vertical finger jitter. A deliberate vertical/diagonal drag
+      // can still move both axes.
+      const next = panChartX(d.vp, d.g.step, dx);
+      const moveY = !d.vp.autoY ||
+        (Math.abs(dy) >= 14 && Math.abs(dy) >= Math.abs(dx) * 0.75);
+      if (moveY) {
         const center = d.baseCenter + (dy / Math.max(1, d.g.plotH)) * d.baseRange;
-        setVp((v) => ({
-          ...v,
-          rightOffset: nextOffset,
+        setVp({
+          ...next,
           autoY: false,
           manualCenter: center,
           manualRange: d.vp.manualRange || d.baseRange,
-          fitAll: false,
-        }));
+        });
       } else {
-        setVp((v) => ({ ...v, rightOffset: nextOffset, fitAll: false }));
+        setVp(next);
       }
     } else if (d.kind === 'time') {
       const dx = z.x - d.x;
@@ -1367,7 +1374,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
       setVp((v) => ({
         ...v,
         fitAll: false,
-        barWidth: Math.max(0.12, Math.min(34, baseBar * Math.exp(dx / 180))),
+        barWidth: Math.max(MIN_BAR_WIDTH, Math.min(40, baseBar * Math.exp(dx / 180))),
       }));
     } else if (d.kind === 'price') {
       const dy = z.y - d.y;
@@ -1385,7 +1392,25 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
 
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     pointers.current.delete(e.pointerId);
-    if (!pointers.current.size) drag.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId))
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    if (!pointers.current.size) {
+      drag.current = null;
+    } else if (pointers.current.size === 1) {
+      // When a two-finger pinch ends, the remaining finger can immediately
+      // resume panning, without a second tap.
+      const remaining = [...pointers.current.values()][0];
+      const g = geometry();
+      if (g) {
+        drag.current = {
+          kind: zone(remaining.x, remaining.y, g),
+          x: remaining.x, y: remaining.y,
+          vp: { ...vp }, g,
+          baseCenter: (g.hi + g.lo) / 2,
+          baseRange: g.hi - g.lo,
+        };
+      } else drag.current = null;
+    }
   };
 
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
