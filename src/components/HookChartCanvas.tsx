@@ -427,6 +427,8 @@ export interface HookChartCanvasProps {
   takeProfit?: number;
   stopLoss?: number;
   entryTimestamp?: number;
+  exitPrice?: number;
+  exitTimestamp?: number;
   focusAt?: number;
   direction?: 'LONG' | 'SHORT';
   formationName?: string;
@@ -453,6 +455,8 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
   takeProfit,
   stopLoss,
   entryTimestamp,
+  exitPrice,
+  exitTimestamp,
   focusAt,
   direction = 'LONG',
   formationName,
@@ -596,6 +600,10 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
       lo = Math.min(lo, stopLoss);
       hi = Math.max(hi, stopLoss);
     }
+    if (exitPrice && exitPrice > 0) {
+      lo = Math.min(lo, exitPrice);
+      hi = Math.max(hi, exitPrice);
+    }
 
     if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
       lo = 0;
@@ -671,7 +679,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
       nearestIndex,
       indexAtTime,
     };
-  }, [candles, vp, rightPadding, entryPrice, takeProfit, stopLoss]);
+  }, [candles, vp, rightPadding, entryPrice, takeProfit, stopLoss, exitPrice]);
 
   const zone = (x: number, y: number, g: any) =>
     x >= g.plotW ? 'price' : y >= g.plotH ? 'time' : 'plot';
@@ -1090,6 +1098,37 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
       }
     }
 
+    // Historical execution uses the actual saved paper fill price and timestamp.
+    // Do not infer an exit from candle highs/lows or fabricate a closed trade.
+    if (exitPrice && exitPrice > 0 && exitTimestamp && exitTimestamp > 0) {
+      const exitBar = Math.floor(exitTimestamp / intervalMs) * intervalMs;
+      const xx = g.x(exitBar), yy = g.y(exitPrice);
+      if (xx >= 0 && xx <= g.plotW && yy >= 0 && yy <= g.plotH) {
+        q.save();
+        q.strokeStyle = '#fbbf24';
+        q.globalAlpha = 0.65;
+        q.setLineDash([3, 4]);
+        q.beginPath();
+        q.moveTo(xx, 0);
+        q.lineTo(xx, g.plotH);
+        q.stroke();
+        q.setLineDash([]);
+        q.globalAlpha = 1;
+        q.beginPath();
+        q.arc(xx, yy, 5, 0, Math.PI * 2);
+        q.fillStyle = '#f59e0b';
+        q.fill();
+        q.strokeStyle = '#fffbeb';
+        q.lineWidth = 2;
+        q.stroke();
+        q.font = 'bold 10px Inter, monospace, system-ui';
+        q.fillStyle = '#fbbf24';
+        q.fillText('ВИХІД', Math.max(4, Math.min(g.plotW - 42, xx + 8)),
+          Math.max(14, Math.min(g.plotH - 4, yy - 8)));
+        q.restore();
+      }
+    }
+
     // Live Current Price Line & Badge
     const last = candles.at(-1);
     if (last) {
@@ -1208,6 +1247,8 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     takeProfit,
     stopLoss,
     entryTimestamp,
+    exitPrice,
+    exitTimestamp,
     tf,
     symbol,
     draft,
