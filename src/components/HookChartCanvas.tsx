@@ -24,6 +24,7 @@ import {
   type MarketPrint,
 } from '../chart/marketAnalytics';
 import { type StrategyResult } from '../chart/strategyEngine';
+import { transformChartX, panChartX, MIN_BAR_WIDTH } from '../chart/chartNavigation';
 
 export type Candle = {
   t: number;
@@ -437,6 +438,7 @@ export interface HookChartCanvasProps {
   rightPadding?: number;
   showVolumes?: boolean;
   autoLevels?: AutoLevel[];
+  showAutoLevels?: boolean;
   densities?: Density[];
   marketPrints?: MarketPrint[];
   liquidations?: Liquidation[];
@@ -465,6 +467,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
   rightPadding = 60,
   showVolumes = true,
   autoLevels: propAutoLevels,
+  showAutoLevels = true,
   densities = [],
   marketPrints = [],
   liquidations = [],
@@ -534,6 +537,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
 
   // Auto-calculated support/resistance levels
   const autoLevels = useMemo(() => {
+    if (!showAutoLevels) return [];
     if (propAutoLevels && propAutoLevels.length) return propAutoLevels;
     if (candles.length < 20) return [];
     try {
@@ -553,7 +557,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     } catch {
       return [];
     }
-  }, [candles, tf, propAutoLevels]);
+  }, [candles, tf, propAutoLevels, showAutoLevels]);
 
   const AX = 82;
   const TX = 0;
@@ -568,7 +572,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     const fitPlotW = Math.max(40, plotW - Math.max(0, rightPadding));
     const step = vp.fitAll
       ? Math.max(0.001, fitPlotW / Math.max(1, candles.length))
-      : Math.max(3, vp.barWidth);
+      : Math.max(MIN_BAR_WIDTH, vp.barWidth);
     const slots = plotW / step;
     const virtualEnd =
       candles.length - vp.rightOffset + Math.max(0, rightPadding) / step;
@@ -707,15 +711,9 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
   };
 
   const zoomX = (factor: number, anchorX: number, g: any) =>
-    setVp((v) => {
-      const old = v.fitAll
-        ? Math.max(0.001, g.step)
-        : Math.max(3, v.barWidth);
-      const nw = Math.max(0.12, Math.min(34, old * factor));
-      const anchorFromRight = (g.plotW - anchorX) / old + v.rightOffset;
-      const nr = anchorFromRight - (g.plotW - anchorX) / nw;
-      return { ...v, barWidth: nw, rightOffset: nr, fitAll: false };
-    });
+    setVp(v => transformChartX(
+      v, g.step, factor, anchorX, anchorX, g.plotW, rightPadding,
+    ));
 
   const zoomY = (factor: number, anchorY: number, g: any) =>
     setVp((v) => {
@@ -730,16 +728,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     });
 
   const panXWheel = (pixels: number) =>
-    setVp((v) => ({
-      ...v,
-      rightOffset:
-        v.rightOffset +
-        pixels /
-          (v.fitAll
-            ? Math.max(0.001, geom.current?.step || 1)
-            : Math.max(3, v.barWidth)),
-      fitAll: false,
-    }));
+    setVp(v => panChartX(v, geom.current?.step || v.barWidth, pixels));
 
   const scheduleDraw = () => {
     if (rafRef.current !== null) return;
@@ -771,16 +760,17 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
 
   const zoomButton = (factor: number) => {
     const g = geometry();
-    setVp((v) => {
-      const base = v.fitAll
-        ? Math.max(0.001, g?.step || 3)
-        : Math.max(3, v.barWidth);
-      return {
-        ...v,
-        fitAll: false,
-        barWidth: Math.max(0.12, Math.min(34, base * factor)),
-      };
-    });
+    if (!g) return;
+    setVp(v => transformChartX(
+      v, g.step, factor, g.plotW / 2, g.plotW / 2, g.plotW, rightPadding,
+    ));
+  };
+
+  const panButton = (bars: number) => {
+    const g = geometry();
+    if (!g) return;
+    // Large accessible targets supplement swipe/drag on touch devices.
+    setVp(v => panChartX(v, g.step, bars * g.step));
   };
 
   // Main canvas render loop
@@ -1022,9 +1012,8 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
       q.globalAlpha = 1;
 
       q.font = '600 10px system-ui';
-      const txt = `${levelPrice(l.p)} ${l.tf}`;
-      q.fillStyle = col;
-      q.fillText(txt, Math.max(6, x0 + 4), Math.max(10, yy - 3));
+      // Level timeframe tags (e.g. 15m / 1h) are intentionally hidden.
+      // Trade Entry / TP / SL and the saved Exit have separate visible labels.
       q.restore();
     }
 
