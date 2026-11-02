@@ -1570,6 +1570,14 @@ export default function App() {
                 <X size={20} />
               </button>
             </div>
+            <p className="muted chart-history-note">
+              {chart.direction ? `${chart.direction} · ` : ""}
+              {chart.formationName ? `Формація: ${chart.formationName} · ` : ""}
+              {chart.entryTimestamp
+                ? `Вхід: ${new Date(chart.entryTimestamp).toLocaleString("uk-UA", { timeZone: "Europe/Warsaw" })}`
+                : "Момент входу не збережено"}
+              {chart.historical ? " · Завершена угода" : " · Відкрита угода або сигнал"}
+            </p>
             <div className="trade-levels" aria-label="Рівні угоди">
               <span className="entry-level">
                 Вхід <strong>{price(chart.entryPrice)}</strong>
