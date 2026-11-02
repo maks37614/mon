@@ -9,6 +9,10 @@ import { pathToFileURL } from "node:url";
 import { Store } from "./backend/store";
 import { Auth, Vault, safeEqual } from "./backend/security";
 import { MarketData } from "./backend/market";
+import { HookMarketClient, HookMarketData, HookFormationSource } from "./backend/hookMarketFeed";
+import { fetchTradeChartCandles } from "./backend/tradeChartCandles";
+import { loadBacktestCandles, runCandleBacktest, validateBacktestInput } from "./backend/backtest";
+import { EDWIN_DEFAULTS, type EdwinSettings } from "./backend/edwinStrategy";
 import { Scanner } from "./backend/scanner";
 import { StrategyBuilderScanner } from "./backend/strategyBuilder";
 import { Trading } from "./backend/trading";
@@ -27,6 +31,7 @@ type Options = {
   fetcher?: typeof fetch;
   gatewayFactory?: any;
   weightBudget?: number;
+  hookSource?: { url: string; token: string };
 };
 const route =
   (fn: (req: Request, res: Response) => unknown) =>
@@ -52,11 +57,13 @@ export function createApplication(options: Options) {
     throw new Error("CRON_SECRET має містити щонайменше 32 випадкові символи");
   const store = new Store(options.directory),
     vault = new Vault(store, options.encryptionKey);
-  const market = new MarketData(
-    () => store.get("settings", DEFAULT_SETTINGS),
-    options.fetcher,
-    options.weightBudget,
-  );
+  const hook = options.hookSource
+    ? new HookMarketClient(options.hookSource.url, options.hookSource.token, options.fetcher)
+    : null;
+  const market = hook
+    ? new HookMarketData(() => store.get("settings", DEFAULT_SETTINGS), hook)
+    : new MarketData(() => store.get("settings", DEFAULT_SETTINGS), options.fetcher, options.weightBudget);
+  const hookSource = hook ? new HookFormationSource(store, hook) : null;
   const scanner = new Scanner(store, market),
     gateway = new ExchangeGateway(vault, options.gatewayFactory);
   const trading = new Trading(
@@ -87,7 +94,7 @@ export function createApplication(options: Options) {
     if (process.env.NODE_ENV !== "development")
       res.setHeader(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src https://s.tradingview.com https://www.tradingview.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
       );
     next();
   });
@@ -99,7 +106,7 @@ export function createApplication(options: Options) {
       !safeEqual(req.get("authorization") || "", `Bearer ${options.cronSecret}`)
     )
       return res.status(401).json({ error: "Unauthorized" });
-    const result = scanner.start(false, "cron");
+    const result = hookSource ? { accepted: false, reason: "h00k-source-only" } : scanner.start(false, "cron");
     res.status(result.accepted ? 202 : 200).json(result);
   });
   app.use(
@@ -129,11 +136,13 @@ export function createApplication(options: Options) {
   app.get("/api/state", (_req, res) => {
     const state = trading.snapshot();
     state.scanner.running = scanner.running;
+    if (hookSource) state.scanner = { ...state.scanner, source: "h00k.top", ...(store.get("hook:source", {})) };
     res.json({
       ...state,
       apiPauses: market.status(),
       schedulerMode: options.schedulerMode || "external",
       formationCount: DEFAULT_SETTINGS.formationTypes.length,
+      hookSourceEnabled: Boolean(hookSource),
     });
   });
   app.put(
@@ -164,10 +173,34 @@ export function createApplication(options: Options) {
     }),
   );
   app.post("/api/scan", (_req, res) => {
-    const result = scanner.start();
+    const result = hookSource ? { accepted: false, reason: "h00k-source-only" } : scanner.start();
     res.status(result.accepted ? 202 : 200).json(result);
   });
   // Isolated strategy builder; never routes its signals to Trading.enter().
+  // Isolated read-only candle backtest: no Trading/Paper calls and no state writes.
+  // Only one explicitly selected instrument from the bounded Krystian feed list.
+  let backtestRunning = false;
+  app.get("/api/backtest", route(async (req, res) => {
+    if (!hook) return res.status(404).json({ error: "Бектест доступний тільки в Krystian" });
+    if (backtestRunning)
+      return res.status(429).json({ error: "Попередній бектест ще виконується" });
+    const input = validateBacktestInput(req.query);
+    const supported: Record<Exchange, string[]> = {
+      binance: ["BTCUSDT","ETHUSDT","SOLUSDT","ZECUSDT","HYPEUSDT","ESPORTSUSDT"],
+      bybit: ["BTCUSDT","ETHUSDT"],
+    };
+    if (!supported[input.exchange].includes(input.symbol))
+      throw new Error("Бектест доступний лише для відстежуваних інструментів Krystian");
+    backtestRunning = true;
+    try {
+      const rows = await loadBacktestCandles(input, options.fetcher);
+      const strategy = store.get<EdwinSettings>("builder:edwin:config", EDWIN_DEFAULTS);
+      res.setHeader("Cache-Control", "no-store");
+      return res.json(runCandleBacktest(rows,input,strategy));
+    } finally {
+      backtestRunning = false;
+    }
+  }));
   app.get("/api/strategy-builder", (_req, res) => res.json(strategyBuilder.snapshot()));
   app.put("/api/strategy-builder", route((req, res) => {
     const { liveAcknowledged, ...configuration } = req.body || {};
@@ -268,15 +301,33 @@ export function createApplication(options: Options) {
       const exchange = req.query.exchange ?? s.exchange;
       if (exchange !== "binance" && exchange !== "bybit")
         throw new Error("Невідома біржа графіка");
-      const data = await market.getCandles(
-        exchange,
-        String(req.query.symbol || "BTCUSDT"),
-        String(req.query.interval || "1m"),
-        Number(req.query.limit || 160),
-        false,
-        req.query.endTime === undefined ? undefined : Number(req.query.endTime),
-      );
-      res.json(data);
+      const symbol = String(req.query.symbol || "BTCUSDT");
+      const timeframe = String(req.query.interval || "1m");
+      const limit = Number(req.query.limit || 160);
+      const endTime = req.query.endTime === undefined ? undefined : Number(req.query.endTime);
+      try {
+        const data = await market.getCandles(
+          exchange, symbol, timeframe, limit,
+          market instanceof HookMarketData, endTime,
+        );
+        res.setHeader("X-Chart-Source", market instanceof HookMarketData ? "h00k-verified" : "exchange");
+        return res.json(data);
+      } catch (feedError) {
+        // This exception is display-only. The h00k trading/formation feed is
+        // never replaced: its verified density, entry and risk gates stay intact.
+        if (!(market instanceof HookMarketData)) throw feedError;
+        const paper = store.get<{positions: {exchange: string; symbol: string}[];
+          history: {exchange: string; symbol: string}[]}>(
+          "book:paper", {positions: [], history: []});
+        const knownTrade = [...paper.positions, ...paper.history]
+          .some(p => p.exchange === exchange && p.symbol === symbol);
+        if (!knownTrade) throw feedError;
+        const data = await fetchTradeChartCandles(
+          exchange, symbol, timeframe, limit, endTime, options.fetcher,
+        );
+        res.setHeader("X-Chart-Source", "exchange-readonly");
+        return res.json(data);
+      }
     }),
   );
   app.use("/api", (_req, res) =>
@@ -315,13 +366,15 @@ export function createApplication(options: Options) {
     strategyBuilder,
     gateway,
     start() {
+      hookSource?.start();
       trading.start();
       strategyBuilder.startTimer();
-      if (options.schedulerMode === "internal")
+      if (options.schedulerMode === "internal" && !hookSource)
         scheduler = setInterval(() => scanner.start(false, "internal"), 10_000);
     },
     async stop() {
       if (scheduler) clearInterval(scheduler);
+      hookSource?.stop();
       await strategyBuilder.stop();
       await trading.stop();
       if (scanner.task) await scanner.task;
@@ -341,6 +394,10 @@ async function main() {
     liveAllowed: process.env.ENABLE_LIVE_TRADING === "true",
     schedulerMode: process.env.SCHEDULER_MODE || "external",
     weightBudget: Number(process.env.BINANCE_WEIGHT_BUDGET || 1000),
+    hookSource: process.env.MON_MARKET_SOURCE === "hook"
+      ? { url: process.env.HOOK_MARKET_FEED_URL || "https://h00k.top",
+          token: process.env.HOOK_MARKET_FEED_TOKEN || "" }
+      : undefined,
   });
   const host = process.env.HOST || "127.0.0.1",
     port = Number(process.env.PORT || 3010);

@@ -27,12 +27,14 @@ import { paperWarningsText, signalConfirmationLabel, tradeHistoryCsv } from "./t
 import { scanIsOverdue, screenerEmptyState } from "./screenerStatus";
 import { TradingScheduleSettings } from "./components/TradingScheduleSettings";
 import { StrategyBuilder } from "./components/StrategyBuilder";
+import { BacktestPanel } from "./components/BacktestPanel";
 import type { TradingScheduleState } from "../backend/tradingSchedule";
 import "./dashboard.css";
 
 type Snapshot = {
   settings: Settings;
   evTestEnabled?: boolean;
+  hookSourceEnabled?: boolean;
   entrySchedule: TradingScheduleState;
   positions: any[];
   history: TradeHistoryEntry[];
@@ -468,8 +470,9 @@ function SettingsPanel({
                 setForm({ ...form, autoEntries: e.target.checked })
               }
             />
-            Автоматичні входи
+            {data.hookSourceEnabled ? "Автоматичне відкриття угод Ev-Test" : "Автоматичні входи"}
           </label>
+          {!data.hookSourceEnabled && (
           <label className="check">
             <input
               type="checkbox"
@@ -480,6 +483,7 @@ function SettingsPanel({
             />
             Реверс напрямку
           </label>
+          )}
           <label className="check">
             <input
               type="checkbox"
@@ -488,9 +492,17 @@ function SettingsPanel({
                 setForm({ ...form, confirmedOnly: e.target.checked })
               }
             />
-            Лише підтверджені формації
+            {data.hookSourceEnabled ? "Лише підтверджені сигнали Ev-Test" : "Лише підтверджені формації"}
           </label>
         </div>
+        {data.hookSourceEnabled && (
+          <p className="muted">
+            «Автоматичне відкриття угод» дозволяє боту самостійно входити за Ev-Test.
+            «Лише підтверджені сигнали» не означає ручне погодження: підтвердження
+            виконує алгоритм за закритими свічками та перевіреною ліквідністю.
+            Почніть із вимкнених автовходів у віртуальному режимі.
+          </p>
+        )}
         <TradingScheduleSettings value={form.tradingSchedule}
           onChange={tradingSchedule => setForm({ ...form, tradingSchedule })} />
         <label>
@@ -502,7 +514,7 @@ function SettingsPanel({
           <small>Автоматичний тариф потребує збережених ключів читання вибраної біржі. Для рівнів маржі Binance також потрібен ключ читання. Bybit надає рівні маржі публічно.</small>
         </label>
         <div className="form-grid">
-          {fields.map((f) => (
+          {fields.filter(f => !data.hookSourceEnabled || !["maxHoldingSeconds", "takeProfitPercent", "stopLossPercent"].includes(f.key)).map((f) => (
             <label key={f.key}>
               {f.label}
               <input
@@ -524,6 +536,7 @@ function SettingsPanel({
             </label>
           ))}
         </div>
+        {!data.hookSourceEnabled && (<>
         <div className="divider" />
         <h2>Сканування всіх монет</h2>
         <p className="muted">
@@ -583,6 +596,14 @@ function SettingsPanel({
             ))}
           </div>
         </fieldset>
+        </>)}
+        {data.hookSourceEnabled && (
+          <div className="notice">
+            Монети та формації надходять із h00k.top. Krystian не сканує весь ринок.
+            Таймфрейми сигналів Ev-Test — 1m / 5m, а параметри стратегії змінюються
+            у розділі «Ev-Test». TP/SL і тайм-стоп беруться з Ev-Test, не з параметрів старого бота.
+          </div>
+        )}
         <div className="notice">
           Симулятор використовує свіжий стакан, taker-комісії, funding та mark price.
           Маржа — isolated для кожної позиції. Прослизання вже включене в ціну виконання.
@@ -767,6 +788,7 @@ export default function App() {
   if (!data) return <div className="loading-page">Завантаження даних…</div>;
   const s = data.settings,
     scan = data.scanner,
+    hookMode = data.hookSourceEnabled === true,
     live = s.mode === "live";
   function openChart(item: any, historical = false) {
     const timeframe = item.timeframe || s.timeframes[0];
@@ -780,6 +802,8 @@ export default function App() {
       takeProfit: item.takeProfit,
       stopLoss: item.stopLoss,
       entryTimestamp: item.openedAt || item.candleAt,
+      exitPrice: historical ? item.exitPrice : undefined,
+      exitTimestamp: historical ? item.closedAt : undefined,
       focusAt: historical ? item.openedAt : undefined,
       formationName: item.formation || item.formationName,
       initialTimeframe: TIMEFRAMES.includes(timeframe) ? timeframe : "1m",
@@ -816,7 +840,7 @@ export default function App() {
     );
     const a = document.createElement("a");
     a.href = url;
-    a.download = `evgen-${s.mode}-trades.csv`;
+    a.download = `${hookMode ? "krystian" : "evgen"}-${s.mode}-trades.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -866,8 +890,9 @@ export default function App() {
       <nav className="mobile-nav" aria-label="Основна навігація">
         {[
           { id: "overview", label: "Огляд" },
-          { id: "screener", label: "Скрінер" },
-          { id: "builder", label: "Конструктор стратегій" },
+          ...(!hookMode ? [{ id: "screener", label: "Скрінер" }] : []),
+          { id: "builder", label: hookMode ? "Ev-Test" : "Конструктор стратегій" },
+          ...(hookMode ? [{ id: "backtest", label: "Бектест" }] : []),
           { id: "settings", label: "Налаштування" },
           { id: "logs", label: "Журнал" },
         ].map((item) => (
@@ -885,8 +910,9 @@ export default function App() {
           <div className="eyebrow">РОБОЧИЙ ПРОСТІР</div>
           {[
             { id: "overview", label: "Огляд торгівлі", Icon: Activity },
-            { id: "screener", label: "Скрінер формацій", Icon: BarChart3 },
-            { id: "builder", label: "Конструктор стратегій", Icon: Settings2 },
+            ...(!hookMode ? [{ id: "screener", label: "Скрінер формацій", Icon: BarChart3 }] : []),
+            { id: "builder", label: hookMode ? "Ev-Test · сигнали" : "Конструктор стратегій", Icon: Settings2 },
+            ...(hookMode ? [{ id: "backtest", label: "Бектест Ev-Test", Icon: BarChart3 }] : []),
             { id: "settings", label: "Налаштування", Icon: Settings2 },
             { id: "logs", label: "Журнал подій", Icon: Clock3 },
           ].map(({ id, label, Icon }) => (
@@ -911,12 +937,15 @@ export default function App() {
         <main className="main-content">
           <div className="page-heading">
             <div>
-              <div className="eyebrow">
-                {live ? "РЕАЛЬНИЙ РАХУНОК" : "ТЕСТУВАННЯ НА РЕАЛЬНОМУ РИНКУ"}
-              </div>
+              {(!hookMode || live) && (
+                <div className="eyebrow">
+                  {live ? "РЕАЛЬНИЙ РАХУНОК" : "ТЕСТУВАННЯ НА РЕАЛЬНОМУ РИНКУ"}
+                </div>
+              )}
               <h1>
                 {tab === "builder"
-                  ? "Конструктор стратегій"
+                  ? hookMode ? "Ev-Test · сигнали" : "Конструктор стратегій"
+                  : tab === "backtest" ? "Бектест Ev-Test"
                   : tab === "settings"
                   ? "Налаштування термінала"
                   : tab === "screener"
@@ -926,9 +955,10 @@ export default function App() {
                       : "Огляд торгівлі"}
               </h1>
               <p className="muted">
-                {tab === "builder" ? "Окремий сканер 1m / 5m · без автоматичних ордерів" : (
+                {tab === "builder" ? (hookMode ? "Стратегія 1m / 5m · формації та реальний стакан із h00k.top" : "Окремий сканер 1m / 5m · без автоматичних ордерів")
+                  : tab === "backtest" ? "Ретроспективний свічковий тест 1m / 5m · Без історичного стакана · Без ордерів" : (
                   <>
-                    USDT perpetual · {s.timeframes.join(" / ")} ·{" "}
+                    USDT perpetual · {hookMode ? (live ? "Ev-Test 1m / 5m · Live" : "Ev-Test 1m / 5m · Paper") : s.timeframes.join(" / ")} ·{" "}
                     {s.autoEntries
                       ? data.entrySchedule?.allowed === false
                         ? "Автоматичні входи очікують торгової сесії"
@@ -938,7 +968,7 @@ export default function App() {
                 )}
               </p>
             </div>
-            {tab !== "builder" && (
+            {!hookMode && tab !== "builder" && (
             <button
               disabled={busy || scan.running}
               onClick={() =>
@@ -1008,11 +1038,13 @@ export default function App() {
                 Ліміт API {exchange}: запити призупинено до {date(at)}.
               </div>
             ))}
-          {tab === "screener" && data.evTestEnabled && (
+          {!hookMode && tab === "screener" && data.evTestEnabled && (
             <div className="notice">Ev-Test активна: ці формації надалі відбирають монети, але старі точки входу вимкнені. Нові точки знаходяться у Конструкторі стратегій.</div>
           )}
           {tab === "builder" ? (
-            <StrategyBuilder onOpenChart={(signal) => openChart({ ...signal, formation: signal.pattern })} />
+            <StrategyBuilder hookMode={hookMode} onOpenChart={(signal) => openChart({ ...signal, formation: signal.pattern })} />
+          ) : hookMode && tab === "backtest" ? (
+            <BacktestPanel />
           ) : tab === "settings" ? (
             <SettingsPanel data={data} run={run} />
           ) : tab === "logs" ? (
@@ -1044,7 +1076,7 @@ export default function App() {
               <div className="metrics">
                 {[
                   {
-                    label: live ? "Баланс біржі" : "Віртуальний баланс",
+                    label: hookMode && !live ? "Баланс" : live ? "Баланс біржі" : "Віртуальний баланс",
                     value: money(data.stats.balance),
                     unit: "USDT",
                     Icon: CircleDollarSign,
@@ -1090,6 +1122,29 @@ export default function App() {
                   </div>
                 ))}
               </div>
+              {hookMode ? (
+              <section className="panel">
+                <div className="section-heading">
+                  <div>
+                    <h2>Джерело торгових сигналів</h2>
+                    <p className="muted">h00k.top · формації та перевірка реальної ліквідності</p>
+                  </div>
+                  <span className={`pill ${scan.connected ? "positive" : "live"}`}>
+                    {scan.connected ? "З’єднання активне" : "Немає зв’язку"}
+                  </span>
+                </div>
+                <div className="coverage-values">
+                  <span><strong>{scan.total ?? 0}</strong> формацій у джерелі</span>
+                  <span><strong>{date(scan.lastSync)}</strong> останній зв’язок</span>
+                </div>
+                {scan.error && <div className="notice error">{scan.error}</div>}
+                <p className="muted">
+                  Krystian не сканує всі біржові пари. Ev-Test працює тільки з
+                  формаціями h00k.top; без свіжого синхронізованого стакана
+                  або підтвердженої щільності нові входи блокуються.
+                </p>
+              </section>
+              ) : (
               <section className="panel coverage-panel">
                 <div>
                   <div className="section-heading">
@@ -1149,6 +1204,7 @@ export default function App() {
                   )}
                 </div>
               </section>
+              )}
               {tab === "overview" && (
                 <>
                   <section className="panel">
@@ -1521,6 +1577,14 @@ export default function App() {
                 <X size={20} />
               </button>
             </div>
+            <p className="muted chart-history-note">
+              {chart.direction ? `${chart.direction} · ` : ""}
+              {chart.formationName ? `Формація: ${chart.formationName} · ` : ""}
+              {chart.entryTimestamp
+                ? `Вхід: ${new Date(chart.entryTimestamp).toLocaleString("uk-UA", { timeZone: "Europe/Warsaw" })}`
+                : "Момент входу не збережено"}
+              {chart.historical ? " · Завершена угода" : " · Відкрита угода або сигнал"}
+            </p>
             <div className="trade-levels" aria-label="Рівні угоди">
               <span className="entry-level">
                 Вхід <strong>{price(chart.entryPrice)}</strong>
@@ -1532,6 +1596,18 @@ export default function App() {
                 Стоп (SL) <strong>{chart.stopLoss ? price(chart.stopLoss) : "—"}</strong>
               </span>
             </div>
+            {chart.historical && chart.exitPrice && (
+              <div className="trade-levels" aria-label="Фактичний вихід угоди">
+                <span className="entry-level" style={{ color: '#fbbf24', borderColor: '#b45309' }}>
+                  Вихід <strong>{price(chart.exitPrice)}</strong>
+                </span>
+                <span className="muted">
+                  {chart.exitTimestamp
+                    ? new Date(chart.exitTimestamp).toLocaleString("uk-UA", { timeZone: "Europe/Warsaw" })
+                    : "Час закриття невідомий"}
+                </span>
+              </div>
+            )}
             {chart.historical && (!chart.takeProfit || !chart.stopLoss) && (
               <p className="muted chart-history-note">
                 У старому записі угоди ціль і стоп не збережені. Для нових угод
@@ -1547,9 +1623,12 @@ export default function App() {
               takeProfit={chart.takeProfit}
               direction={chart.direction}
               entryTimestamp={chart.entryTimestamp}
+              exitPrice={chart.exitPrice}
+              exitTimestamp={chart.exitTimestamp}
               focusAt={chart.focusAt}
               formationName={chart.formationName}
               initialTimeframe={chart.initialTimeframe}
+              verifiedOnly={hookMode}
               height={520}
             />
           </div>

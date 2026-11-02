@@ -24,6 +24,7 @@ import {
   type MarketPrint,
 } from '../chart/marketAnalytics';
 import { type StrategyResult } from '../chart/strategyEngine';
+import { transformChartX, panChartX, MIN_BAR_WIDTH } from '../chart/chartNavigation';
 
 export type Candle = {
   t: number;
@@ -427,6 +428,8 @@ export interface HookChartCanvasProps {
   takeProfit?: number;
   stopLoss?: number;
   entryTimestamp?: number;
+  exitPrice?: number;
+  exitTimestamp?: number;
   focusAt?: number;
   direction?: 'LONG' | 'SHORT';
   formationName?: string;
@@ -435,6 +438,7 @@ export interface HookChartCanvasProps {
   rightPadding?: number;
   showVolumes?: boolean;
   autoLevels?: AutoLevel[];
+  showAutoLevels?: boolean;
   densities?: Density[];
   marketPrints?: MarketPrint[];
   liquidations?: Liquidation[];
@@ -453,6 +457,8 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
   takeProfit,
   stopLoss,
   entryTimestamp,
+  exitPrice,
+  exitTimestamp,
   focusAt,
   direction = 'LONG',
   formationName,
@@ -461,6 +467,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
   rightPadding = 60,
   showVolumes = true,
   autoLevels: propAutoLevels,
+  showAutoLevels = true,
   densities = [],
   marketPrints = [],
   liquidations = [],
@@ -530,6 +537,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
 
   // Auto-calculated support/resistance levels
   const autoLevels = useMemo(() => {
+    if (!showAutoLevels) return [];
     if (propAutoLevels && propAutoLevels.length) return propAutoLevels;
     if (candles.length < 20) return [];
     try {
@@ -549,7 +557,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     } catch {
       return [];
     }
-  }, [candles, tf, propAutoLevels]);
+  }, [candles, tf, propAutoLevels, showAutoLevels]);
 
   const AX = 82;
   const TX = 0;
@@ -564,7 +572,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     const fitPlotW = Math.max(40, plotW - Math.max(0, rightPadding));
     const step = vp.fitAll
       ? Math.max(0.001, fitPlotW / Math.max(1, candles.length))
-      : Math.max(3, vp.barWidth);
+      : Math.max(MIN_BAR_WIDTH, vp.barWidth);
     const slots = plotW / step;
     const virtualEnd =
       candles.length - vp.rightOffset + Math.max(0, rightPadding) / step;
@@ -595,6 +603,10 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     if (stopLoss && stopLoss > 0) {
       lo = Math.min(lo, stopLoss);
       hi = Math.max(hi, stopLoss);
+    }
+    if (exitPrice && exitPrice > 0) {
+      lo = Math.min(lo, exitPrice);
+      hi = Math.max(hi, exitPrice);
     }
 
     if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
@@ -671,7 +683,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
       nearestIndex,
       indexAtTime,
     };
-  }, [candles, vp, rightPadding, entryPrice, takeProfit, stopLoss]);
+  }, [candles, vp, rightPadding, entryPrice, takeProfit, stopLoss, exitPrice]);
 
   const zone = (x: number, y: number, g: any) =>
     x >= g.plotW ? 'price' : y >= g.plotH ? 'time' : 'plot';
@@ -699,15 +711,9 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
   };
 
   const zoomX = (factor: number, anchorX: number, g: any) =>
-    setVp((v) => {
-      const old = v.fitAll
-        ? Math.max(0.001, g.step)
-        : Math.max(3, v.barWidth);
-      const nw = Math.max(0.12, Math.min(34, old * factor));
-      const anchorFromRight = (g.plotW - anchorX) / old + v.rightOffset;
-      const nr = anchorFromRight - (g.plotW - anchorX) / nw;
-      return { ...v, barWidth: nw, rightOffset: nr, fitAll: false };
-    });
+    setVp(v => transformChartX(
+      v, g.step, factor, anchorX, anchorX, g.plotW, rightPadding,
+    ));
 
   const zoomY = (factor: number, anchorY: number, g: any) =>
     setVp((v) => {
@@ -722,16 +728,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     });
 
   const panXWheel = (pixels: number) =>
-    setVp((v) => ({
-      ...v,
-      rightOffset:
-        v.rightOffset +
-        pixels /
-          (v.fitAll
-            ? Math.max(0.001, geom.current?.step || 1)
-            : Math.max(3, v.barWidth)),
-      fitAll: false,
-    }));
+    setVp(v => panChartX(v, geom.current?.step || v.barWidth, pixels));
 
   const scheduleDraw = () => {
     if (rafRef.current !== null) return;
@@ -763,16 +760,17 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
 
   const zoomButton = (factor: number) => {
     const g = geometry();
-    setVp((v) => {
-      const base = v.fitAll
-        ? Math.max(0.001, g?.step || 3)
-        : Math.max(3, v.barWidth);
-      return {
-        ...v,
-        fitAll: false,
-        barWidth: Math.max(0.12, Math.min(34, base * factor)),
-      };
-    });
+    if (!g) return;
+    setVp(v => transformChartX(
+      v, g.step, factor, g.plotW / 2, g.plotW / 2, g.plotW, rightPadding,
+    ));
+  };
+
+  const panButton = (bars: number) => {
+    const g = geometry();
+    if (!g) return;
+    // Large accessible targets supplement swipe/drag on touch devices.
+    setVp(v => panChartX(v, g.step, bars * g.step));
   };
 
   // Main canvas render loop
@@ -1014,9 +1012,8 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
       q.globalAlpha = 1;
 
       q.font = '600 10px system-ui';
-      const txt = `${levelPrice(l.p)} ${l.tf}`;
-      q.fillStyle = col;
-      q.fillText(txt, Math.max(6, x0 + 4), Math.max(10, yy - 3));
+      // Level timeframe tags (e.g. 15m / 1h) are intentionally hidden.
+      // Trade Entry / TP / SL and the saved Exit have separate visible labels.
       q.restore();
     }
 
@@ -1086,6 +1083,37 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
         q.strokeStyle = '#e0faff';
         q.lineWidth = 2;
         q.stroke();
+        q.restore();
+      }
+    }
+
+    // Historical execution uses the actual saved paper fill price and timestamp.
+    // Do not infer an exit from candle highs/lows or fabricate a closed trade.
+    if (exitPrice && exitPrice > 0 && exitTimestamp && exitTimestamp > 0) {
+      const exitBar = Math.floor(exitTimestamp / intervalMs) * intervalMs;
+      const xx = g.x(exitBar), yy = g.y(exitPrice);
+      if (xx >= 0 && xx <= g.plotW && yy >= 0 && yy <= g.plotH) {
+        q.save();
+        q.strokeStyle = '#fbbf24';
+        q.globalAlpha = 0.65;
+        q.setLineDash([3, 4]);
+        q.beginPath();
+        q.moveTo(xx, 0);
+        q.lineTo(xx, g.plotH);
+        q.stroke();
+        q.setLineDash([]);
+        q.globalAlpha = 1;
+        q.beginPath();
+        q.arc(xx, yy, 5, 0, Math.PI * 2);
+        q.fillStyle = '#f59e0b';
+        q.fill();
+        q.strokeStyle = '#fffbeb';
+        q.lineWidth = 2;
+        q.stroke();
+        q.font = 'bold 10px Inter, monospace, system-ui';
+        q.fillStyle = '#fbbf24';
+        q.fillText('ВИХІД', Math.max(4, Math.min(g.plotW - 42, xx + 8)),
+          Math.max(14, Math.min(g.plotH - 4, yy - 8)));
         q.restore();
       }
     }
@@ -1208,6 +1236,8 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     takeProfit,
     stopLoss,
     entryTimestamp,
+    exitPrice,
+    exitTimestamp,
     tf,
     symbol,
     draft,
@@ -1247,23 +1277,31 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    e.currentTarget.setPointerCapture(e.pointerId);
     const z = point(e);
     if (!z) return;
+    // Capture the original finger/mouse pointer even when it travels outside canvas.
+    // touch-action:none on canvas prevents browser page-scroll/pinch stealing it.
+    e.currentTarget.setPointerCapture(e.pointerId);
+    if (tool === 'cursor') e.currentTarget.classList.add('is-panning');
+    if (e.pointerType === 'touch') e.preventDefault();
     pointers.current.set(e.pointerId, { x: z.x, y: z.y });
 
     if (pointers.current.size === 2) {
       const a = [...pointers.current.values()];
+      const midX = (a[0].x + a[1].x) / 2;
       const midY = (a[0].y + a[1].y) / 2;
+      const g = z.g;
       drag.current = {
         kind: 'pinch',
-        dist: Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y),
-        bar: vp.fitAll ? Math.max(0.001, z.g.step) : vp.barWidth,
-        baseRange: vp.autoY
-          ? z.g.hi - z.g.lo
-          : vp.manualRange || z.g.hi - z.g.lo,
-        anchorY: midY,
-        anchorPrice: z.g.p(Math.max(0, Math.min(z.g.plotH, midY))),
+        dist: Math.max(1, Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y)),
+        baseVp: { ...vp },
+        baseStep: g.step,
+        startX: midX,
+        startY: midY,
+        baseRange: vp.autoY ? g.hi - g.lo : vp.manualRange || g.hi - g.lo,
+        anchorPrice: g.p(Math.max(0, Math.min(g.plotH, midY))),
+        plotW: g.plotW,
+        plotH: g.plotH,
       };
       return;
     }
@@ -1289,47 +1327,47 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     const d = drag.current;
     if (!d) return;
 
-    if (tool !== 'cursor') return;
-
     if (d.kind === 'pinch' && pointers.current.size >= 2) {
       const a = [...pointers.current.values()];
       const dist = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y);
-      const ratio = Math.max(0.35, Math.min(3.2, dist / (d.dist || 1)));
-      const anchorY = Math.max(0, Math.min(z.g.plotH, d.anchorY ?? z.g.plotH / 2));
-      const nr = Math.max(1e-9, (d.baseRange || z.g.hi - z.g.lo) / ratio);
-      const anchorPrice = d.anchorPrice ?? z.g.p(anchorY);
-      const anchorRatio = anchorY / Math.max(1, z.g.plotH) - 0.5;
-      const nc = anchorPrice + anchorRatio * nr;
-      setVp((v) => ({
-        ...v,
-        fitAll: false,
-        barWidth: Math.max(0.12, Math.min(34, d.bar * ratio)),
+      const ratio = Math.max(0.3, Math.min(4, dist / d.dist));
+      const midX = (a[0].x + a[1].x) / 2;
+      const midY = (a[0].y + a[1].y) / 2;
+      const nextHorizontal = transformChartX(d.baseVp, d.baseStep, ratio,
+        d.startX, midX, d.plotW, rightPadding);
+      const nr = Math.max(1e-9, d.baseRange / ratio);
+      const anchorY = Math.max(0, Math.min(d.plotH, midY));
+      const center = d.anchorPrice + (anchorY / Math.max(1, d.plotH) - 0.5) * nr;
+      setVp({
+        ...nextHorizontal,
         autoY: false,
         manualRange: nr,
-        manualCenter: nc,
-      }));
+        manualCenter: center,
+      });
       return;
     }
+
+    if (tool !== 'cursor') return;
 
     if (d.kind === 'plot') {
       const dx = z.x - d.x;
       const dy = z.y - d.y;
-      const nextOffset =
-        d.vp.rightOffset +
-        dx / Math.max(0.001, d.vp.fitAll ? d.g.step : d.vp.barWidth);
-      const movedY = Math.abs(dy) > 1.5 || !d.vp.autoY;
-      if (movedY) {
+      // A normal sideways swipe must NOT silently change the price scale due
+      // to small vertical finger jitter. A deliberate vertical/diagonal drag
+      // can still move both axes.
+      const next = panChartX(d.vp, d.g.step, dx);
+      const moveY = !d.vp.autoY ||
+        (Math.abs(dy) >= 14 && Math.abs(dy) >= Math.abs(dx) * 0.75);
+      if (moveY) {
         const center = d.baseCenter + (dy / Math.max(1, d.g.plotH)) * d.baseRange;
-        setVp((v) => ({
-          ...v,
-          rightOffset: nextOffset,
+        setVp({
+          ...next,
           autoY: false,
           manualCenter: center,
           manualRange: d.vp.manualRange || d.baseRange,
-          fitAll: false,
-        }));
+        });
       } else {
-        setVp((v) => ({ ...v, rightOffset: nextOffset, fitAll: false }));
+        setVp(next);
       }
     } else if (d.kind === 'time') {
       const dx = z.x - d.x;
@@ -1337,7 +1375,7 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
       setVp((v) => ({
         ...v,
         fitAll: false,
-        barWidth: Math.max(0.12, Math.min(34, baseBar * Math.exp(dx / 180))),
+        barWidth: Math.max(MIN_BAR_WIDTH, Math.min(40, baseBar * Math.exp(dx / 180))),
       }));
     } else if (d.kind === 'price') {
       const dy = z.y - d.y;
@@ -1354,8 +1392,28 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!pointers.current.has(e.pointerId)) return;
     pointers.current.delete(e.pointerId);
-    if (!pointers.current.size) drag.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId))
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    if (!pointers.current.size) {
+      drag.current = null;
+      e.currentTarget.classList.remove('is-panning');
+    } else if (pointers.current.size === 1) {
+      // When a two-finger pinch ends, the remaining finger can immediately
+      // resume panning, without a second tap.
+      const remaining = [...pointers.current.values()][0];
+      const g = geometry();
+      if (g) {
+        drag.current = {
+          kind: zone(remaining.x, remaining.y, g),
+          x: remaining.x, y: remaining.y,
+          vp: { ...vp }, g,
+          baseCenter: (g.hi + g.lo) / 2,
+          baseRange: g.hi - g.lo,
+        };
+      } else drag.current = null;
+    }
   };
 
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
@@ -1391,6 +1449,26 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
     }
     const anchor = e.ctrlKey || e.metaKey ? ax : g.plotW;
     zoomX(factor, anchor, g);
+  };
+
+  const handleKeyboard = (e: React.KeyboardEvent<HTMLCanvasElement>) => {
+    if (tool !== 'cursor') return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      panButton(e.key === 'ArrowLeft' ? 12 : -12);
+    } else if (e.key === '+' || e.key === '=') {
+      e.preventDefault();
+      zoomButton(1.2);
+    } else if (e.key === '-') {
+      e.preventDefault();
+      zoomButton(1 / 1.2);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      fitAllHistory();
+    } else if (e.key === '0') {
+      e.preventDefault();
+      reset();
+    }
   };
 
   const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1456,6 +1534,10 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
             </div>
             {zoomPanelOpen && (
               <div className="scaleTools">
+                <button type="button" title="Раніше: пересунути графік до старіших свічок" aria-label="Показати старіші свічки"
+                  onClick={() => panButton(12)}>←</button>
+                <button type="button" title="Пізніше: пересунути графік до новіших свічок" aria-label="Показати новіші свічки"
+                  onClick={() => panButton(-12)}>→</button>
                 <button
                   title="Збільшити масштаб"
                   onClick={() => zoomButton(1.2)}
@@ -1516,12 +1598,18 @@ export const HookChartCanvas: React.FC<HookChartCanvasProps> = ({
           {/* HTML5 Canvas Surface */}
           <canvas
             ref={ref}
+            tabIndex={0}
+            role="application"
+            style={{ cursor: tool === 'cursor' ? 'grab' : 'crosshair' }}
+            aria-label={`Графік ${symbol}: перетягуйте мишею або пальцем, двома пальцями змінюйте масштаб, стрілки вліво-вправо для навігації`}
+            onKeyDown={handleKeyboard}
             onClick={handleClick}
             onWheel={handleWheel}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerUp}
+            onLostPointerCapture={handlePointerUp}
             onPointerLeave={() => {
               mouseRef.current = null;
               scheduleDraw();

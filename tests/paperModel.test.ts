@@ -88,6 +88,72 @@ for (const reverseEnabled of [false, true]) test(`settled funding is signed, dur
   approx(restarted.snapshot().stats.balance - 1000, h.netPnl);
 });
 
+test("Binance funding at scheduled time plus 1ms is verified once, including restart", async t => {
+  const f = fixture(t);
+  await f.trading.enter("signal");
+  const p = f.trading.snapshot().positions[0];
+  const scheduled = Date.parse("2026-10-26T08:00:00.000Z");
+  const published = scheduled + 1;
+  f.at("2026-10-26T08:00:10.000Z");
+  const actual = { at: published, rate: 0.00005, price: 101, priceSource: "settlement-mark" as const };
+  f.market.getFundingEvents = async (_exchange: string, _symbol: string, from: number, until: number) =>
+    published >= from && published <= until ? [actual] : [];
+  await f.trading.monitor();
+  const first = f.trading.snapshot().positions[0];
+  const expected = actual.rate * actual.price * p.quantity;
+  approx(first.paper!.fundingCost, expected);
+  assert.equal(first.paper!.fundingEvents.length, 1);
+  assert.equal(first.paper!.fundingEvents[0].at, published);
+  const balance = f.trading.snapshot().stats.balance;
+  const restarted = f.restart();
+  await restarted.monitor();
+  const second = restarted.snapshot().positions[0];
+  assert.equal(second.paper!.fundingEvents.length, 1);
+  approx(second.paper!.fundingCost, expected);
+  approx(restarted.snapshot().stats.balance, balance);
+  await restarted.closePosition(p.id);
+  assert.equal(restarted.snapshot().positions.length, 0);
+  approx(restarted.snapshot().history[0].fundingCost!, expected);
+});
+
+test("a delayed +3ms official funding event releases frozen close without changing fill", async t => {
+  const f = fixture(t);
+  await f.trading.enter("signal");
+  const p = f.trading.snapshot().positions[0];
+  f.at("2026-10-26T08:00:10Z");
+  f.prices(101);
+  f.market.getFundingEvents = async () => [];
+  await assert.rejects(f.trading.closePosition(p.id), /ще не опубліковане/);
+  const frozen = f.trading.snapshot().positions[0].paper!.closeFill!;
+  f.at("2026-10-26T08:01:10Z");
+  const actual = { at: Date.parse("2026-10-26T08:00:00Z") + 3,
+    rate: 0.00005, price: 100, priceSource: "settlement-mark" };
+  f.market.getFundingEvents = async (_exchange: string, _symbol: string, from: number, until: number) =>
+    actual.at >= from && actual.at <= until ? [actual] : [];
+  const restarted = f.restart();
+  await restarted.monitor();
+  assert.equal(restarted.snapshot().positions.length, 0);
+  const closed = restarted.snapshot().history[0];
+  assert.equal(closed.closedAt, frozen.at);
+  assert.equal(closed.exitPrice, frozen.price);
+  assert.equal(closed.paper!.fundingEvents.length, 1);
+  assert.equal(closed.paper!.fundingEvents[0].at, actual.at);
+});
+
+test("do not accept a different funding event beyond the 1 second scheduled tolerance", async t => {
+  const f = fixture(t);
+  await f.trading.enter("signal");
+  const p = f.trading.snapshot().positions[0];
+  f.at("2026-10-26T08:00:10Z");
+  const unrelated = {at:Date.parse("2026-10-26T08:00:00Z") + 1001,
+    rate:0.001,price:100,priceSource:"settlement-mark"};
+  f.market.getFundingEvents = async () => [unrelated];
+  await assert.rejects(f.trading.closePosition(p.id), /ще не опубліковане/);
+  assert.equal(f.trading.snapshot().positions.length, 1);
+  assert.equal(f.trading.snapshot().history.length, 0);
+  assert.equal(f.trading.snapshot().positions[0].paper!.fundingEvents.length, 0);
+});
+
 test("a filled close waiting for delayed funding survives restart with its original price and time", async t => {
   const f = fixture(t); await f.trading.enter("signal"); const p = f.trading.snapshot().positions[0];
   f.at("2026-10-26T08:00:10Z"); f.prices(101);

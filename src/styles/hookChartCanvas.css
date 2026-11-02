@@ -545,3 +545,54 @@
 .strategyHud .neutral {
   color: #94a3b8;
 }
+
+
+/* Krystian trade review: visible, touch-sized navigation on phones/tablets.
+   Keep it inside the canvas instead of covering the bottom time axis. */
+.krystianTradeChart .chartStage .chartScaleDock {
+  right: 8px !important;
+  bottom: 8px !important;
+  height: auto !important;
+  padding: 3px !important;
+  border: 1px solid #37465a !important;
+  border-radius: 9px !important;
+  background: rgba(12, 19, 30, .95) !important;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, .4) !important;
+  max-width: calc(100% - 16px);
+}
+.krystianTradeChart .chartScaleDock .scaleTools button,
+.krystianTradeChart .chartScaleDock .scaleDockToggle {
+  min-width: 34px;
+  width: auto;
+  height: 34px;
+  touch-action: manipulation;
+}
+.krystianTradeChart .chartScaleDock .scaleDockToggle {
+  width: 28px;
+  min-width: 28px;
+}
+.krystianTradeChart .chartWrap canvas {
+  cursor: grab;
+  overscroll-behavior: contain;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.krystianTradeChart .chartWrap canvas.is-panning { cursor: grabbing; }
+.krystianTradeChart .chartWrap canvas:focus-visible {
+  outline: 2px solid #22d3ee !important;
+  outline-offset: -3px;
+}
+@media (max-width: 600px) {
+  .krystianTradeChart .chartScaleDock .barCountdown {
+    display: none;
+  }
+  .krystianTradeChart .chartScaleDock .scaleReset {
+    display: none;
+  }
+}
+@media (max-width: 370px) {
+  .krystianTradeChart .chartScaleDock .scaleHistory {
+    display: none;
+  }
+}

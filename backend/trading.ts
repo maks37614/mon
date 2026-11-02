@@ -12,6 +12,7 @@ import {
 import { Mutex, type Store } from "./store";
 import { formationIsVisible, signalAllowsEntry } from "./formationState";
 import { EV_TEST_ID, selectEvTestCandidates } from "./evTestRouting";
+import { HookMarketData } from "./hookMarketFeed";
 import { EDWIN_DEFAULTS, type EdwinSettings, type EdwinSignal } from "./edwinStrategy";
 import { tradingScheduleState } from "./tradingSchedule";
 import type { MarketData } from "./market";
@@ -367,6 +368,10 @@ export class Trading {
     if (isEvTest !== this.evTestEnabled()) throw new Error("Стратегія перемкнулася; сигнал більше не активний");
     if (isEvTest && !this.evTestCandidates(s).some((candidate) => candidate.id === signal.id))
       throw new Error("Ev-Test: сигнал зник з актуального списку формацій або застарів");
+    if (isEvTest && this.market instanceof HookMarketData &&
+      !(await this.market.hook.verifiedDensity(s.exchange, signal.symbol,
+        signal.direction === 'LONG' ? 'BID' : 'ASK', signal.entryPrice)))
+      throw new Error("Ev-Test: підтверджена жива щільність h00k.top недоступна");
     if (isEvTest) {
       const risk = this.evTestRiskSettings();
       const today = (at: number) => new Intl.DateTimeFormat("en-CA", {
@@ -503,6 +508,10 @@ export class Trading {
     // Quotes, account reads and exchange preparation may span the session boundary.
     if (isEvTest !== this.evTestEnabled() || (isEvTest && !this.evTestCandidates(this.settings()).some(candidate => candidate.id === signal.id)))
       throw new Error("Ev-Test: умови або джерело монети змінилися до відправлення ордера");
+    if (isEvTest && this.market instanceof HookMarketData &&
+      !(await this.market.hook.verifiedDensity(s.exchange, signal.symbol,
+        signal.direction === 'LONG' ? 'BID' : 'ASK', signal.entryPrice)))
+      throw new Error("Ev-Test: щільність змінилася до виконання ордера");
     if (Date.now() - signal.candleAt > s.maxSignalAgeSeconds * 1000) throw new Error("Сигнал застарів під час підготовки виконання");
     if (automatic && !tradingScheduleState(s.tradingSchedule).allowed)
       throw new Error("Торгова сесія завершилася під час підготовки входу");
@@ -721,7 +730,14 @@ export class Trading {
     if (!backfill && until < state.nextFundingAt) { state.fundingCheckedAt = until; return; }
     const from = Math.max(p.openedAt, state.fundingCheckedAt + 1), end = Math.min(until, from + 31 * 86400_000);
     const events = await this.market.getFundingEvents(p.exchange, p.symbol, from, end);
-    if (state.nextFundingAt >= from && state.nextFundingAt <= end && !events.some(e => e.at === state.nextFundingAt))
+    // The exchange's scheduled funding timestamp is usually at a whole second,
+    // while published Binance settlements can have a small millisecond offset
+    // (e.g. scheduled 20:00:00.000, published 20:00:00.001). Require an actual
+    // exchange event within the bounded settlement window, not exact equality.
+    // Never infer, fabricate, or debit a funding payment that was not returned.
+    const FUNDING_TIMESTAMP_TOLERANCE_MS = 1000;
+    if (state.nextFundingAt >= from && state.nextFundingAt <= end &&
+      !events.some(e => Math.abs(e.at - state.nextFundingAt) <= FUNDING_TIMESTAMP_TOLERANCE_MS))
       throw new Error("Нарахування funding ще не опубліковане; результат очікує звірки");
     for (const e of events) {
       if (e.at < from || e.at > end || state.fundingEvents.some(x => x.at === e.at)) continue;

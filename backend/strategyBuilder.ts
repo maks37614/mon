@@ -2,6 +2,7 @@ import { DEFAULT_SETTINGS, type Exchange, type Signal } from "./config";
 import { formationIsVisible } from "./formationState";
 import type { Store } from "./store";
 import type { MarketData } from "./market";
+import { HookMarketData } from "./hookMarketFeed";
 import {
   EDWIN_DEFAULTS, EDWIN_STRATEGY, detectEdwinSetups, validateEdwinSettings,
   type EdwinSettings, type EdwinSignal,
@@ -84,17 +85,33 @@ export class StrategyBuilderScanner {
     const sourceSettings = this.store.get("settings", DEFAULT_SETTINGS);
     const sourceSignals = this.store.get<Signal[]>("signals", [])
       .filter((signal) => formationIsVisible(signal, sourceSettings));
-    const markets = [...new Set(sourceSignals.filter((signal) => signal.exchange === exchange).map((signal) => signal.symbol))].sort();
+    const universe = [...new Set(sourceSignals.filter((signal) => signal.exchange === exchange).map((signal) => signal.symbol))].sort();
+    // h00k observes only a bounded set of formation order books. Never spend candle
+    // requests on uncovered symbols (e.g. LITUSDT when not among the live streams).
+    const depthReady = this.market instanceof HookMarketData && universe.length
+      ? await this.market.hook.liveBookSymbols(exchange) : null;
+    const markets = depthReady
+      ? universe.filter(symbol => depthReady.has(symbol)) : universe;
+    const withoutLiveBook = universe.length - markets.length;
     if (!markets.length) {
       this.store.set("builder:edwin:signals", []);
-      this.store.set("builder:edwin:status", { running: false, exchange, lastStartedAt: this.store.get<any>("builder:edwin:status", {}).lastStartedAt || Date.now(), lastFinishedAt: Date.now(), cursor: 0, total: 0, scanned: 0, failed: 0, detected: 0, error: "Скрінер формацій поки не відібрав монет" });
+      this.store.set("builder:edwin:status", {
+        running: false, exchange,
+        lastStartedAt: this.store.get<any>("builder:edwin:status", {}).lastStartedAt || Date.now(),
+        lastFinishedAt: Date.now(), cursor: 0, total: 0, scanned: 0, failed: 0,
+        detected: 0, source: depthReady ? "h00k-formations" : "formations",
+        formationSymbols: universe.length, withoutLiveBook,
+        error: depthReady
+          ? "Очікуємо живі синхронізовані стакани h00k.top для монет із формацій"
+          : "Скрінер формацій поки не відібрав монет",
+      });
       return;
     }
     const previous = this.store.get<any>("builder:edwin:status", {});
     const cursor = previous.exchange === exchange ? (previous.cursor || 0) % markets.length : 0;
     const count = Math.min(settings.symbolsPerBatch, markets.length);
     const found: EdwinSignal[] = [];
-    let scanned = 0, failed = 0, index = cursor;
+    let scanned = 0, failed = 0, skippedDepth = 0, index = cursor;
     let message = "";
     for (let i = 0; i < count; i++) {
       // A switch-off must stop new API work rather than complete an unwanted batch.
@@ -125,6 +142,11 @@ export class StrategyBuilderScanner {
               const lookback = history.slice(0, -6);
               const meanRange = lookback.reduce((sum, row) => sum + ((row.high - row.low) / row.close) * 100, 0) / Math.max(1, lookback.length);
               for (const signal of latest) {
+                // In Krystian mode, real synchronized exchange liquidity is mandatory.
+                // A 15s+ persistent visible wall must support the intended direction.
+                if (this.market instanceof HookMarketData &&
+                  !(await this.market.hook.verifiedDensity(exchange, symbol,
+                    signal.direction === 'LONG' ? 'BID' : 'ASK', signal.entryPrice))) continue;
                 const delta = signal.direction === "LONG" ? "купівлю" : "продаж";
                 signal.description += " | Спред " + spreadPercent.toFixed(3) + "%; середній діапазон 5m за ~3 дні " +
                   meanRange.toFixed(2) + "%; напрям " + delta + ".";
@@ -135,8 +157,16 @@ export class StrategyBuilderScanner {
         }
         scanned++;
       } catch (error: any) {
-        failed++;
-        if (!message) message = String(error?.message || "Помилка даних").slice(0, 180);
+        const reason = String(error?.message || "Помилка даних").slice(0, 180);
+        if (this.market instanceof HookMarketData &&
+            reason.startsWith("No fresh synchronized h00k order book")) {
+          // A live stream can expire between selection and final confirmation.
+          // This is an expected data-quality skip, not an exchange/API failure.
+          skippedDepth++;
+        } else {
+          failed++;
+          if (!message) message = reason;
+        }
         if ((this.market.status()[exchange] || 0) > Date.now()) break;
       }
       index = (index + 1) % markets.length;
@@ -155,7 +185,9 @@ export class StrategyBuilderScanner {
     this.store.set("builder:edwin:status", {
       running: false, exchange, lastStartedAt: previous.lastStartedAt || now, lastFinishedAt: now,
       lastFullPassAt: this.store.get<number | null>("builder:edwin:lastFullPass", null),
-      cursor: index, total: markets.length, scanned, failed, detected: found.length, source: "formations", error: message || null,
+      cursor: index, total: markets.length, scanned, failed, skippedDepth,
+      formationSymbols: universe.length, withoutLiveBook,
+      detected: found.length, source: this.market instanceof HookMarketData ? "h00k-formations" : "formations", error: message || null,
     });
   }
 

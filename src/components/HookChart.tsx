@@ -7,7 +7,6 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   ExternalLink,
-  Layers,
   Crosshair,
   TrendingUp,
   Minus,
@@ -25,6 +24,8 @@ export interface HookChartProps {
   stopLoss?: number;
   takeProfit?: number;
   entryTimestamp?: number;
+  exitPrice?: number;
+  exitTimestamp?: number;
   focusAt?: number;
   currentPrice?: number;
   direction?: 'LONG' | 'SHORT';
@@ -34,6 +35,7 @@ export interface HookChartProps {
   height?: number;
   initialTimeframe?: Timeframe;
   compact?: boolean;
+  verifiedOnly?: boolean;
 }
 
 // Candle close countdown calculation copied directly from h00k.top Wj(e)
@@ -71,6 +73,8 @@ export const HookChart: React.FC<HookChartProps> = ({
   stopLoss,
   takeProfit,
   entryTimestamp,
+  exitPrice,
+  exitTimestamp,
   focusAt,
   currentPrice: initialCurrentPrice,
   direction = 'LONG',
@@ -80,17 +84,26 @@ export const HookChart: React.FC<HookChartProps> = ({
   height = 360,
   initialTimeframe = '1m',
   compact = false,
+  verifiedOnly = false,
 }) => {
-  // Chart Engine Provider: 'hookchart' (native Canvas engine from h00k.top) or 'tradingview' (real embed)
-  const [provider, setProvider] = useState<'hookchart' | 'tradingview'>('hookchart');
-  const [timeframe, setTimeframe] = useState<Timeframe>(initialTimeframe);
+  // One native HookChart; the h00k private feed provides only closed 1m/5m candles.
+  const allowedTimeframes: Timeframe[] = verifiedOnly
+    ? ['1m', '5m']
+    : ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
+  const [timeframe, setTimeframe] = useState<Timeframe>(
+    verifiedOnly && !['1m', '5m'].includes(initialTimeframe) ? '5m' : initialTimeframe
+  );
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isExpanded, setIsExpanded] = useState<boolean>(false);
   const [livePrice, setLivePrice] = useState<number>(initialCurrentPrice || entryPrice || 0);
   const [candles, setCandles] = useState<Candle[]>([]);
   const [activeTool, setActiveTool] = useState<string>('cursor');
   const [dataError, setDataError] = useState('');
-  const historical = Number.isFinite(focusAt) && focusAt > 0;
+  const [chartSource, setChartSource] = useState<string>('h00k-verified');
+  const historical = Number.isFinite(focusAt) && (focusAt ?? 0) > 0;
+  const entryInLoadedWindow = !historical || !entryTimestamp || !candles.length ||
+    (entryTimestamp >= candles[0].t &&
+      entryTimestamp < candles[candles.length - 1].t + tfMs(timeframe));
 
   const isDisposedRef = useRef<boolean>(false);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -136,8 +149,11 @@ export const HookChart: React.FC<HookChartProps> = ({
     abortControllerRef.current = controller;
     try {
       const query = new URLSearchParams({ symbol, exchange, interval: timeframe, limit: '300' });
+      // For recorded trades use a bounded chart-only exchange history if h00k
+      // no longer retains their fresh formation. No replay data is fabricated.
       if (historical) {
-        query.set('endTime', String(Math.min(Date.now(), focusAt + tfMs(timeframe) * 90)));
+        const anchor = Math.max(focusAt!, exitTimestamp || focusAt!);
+        query.set('endTime', String(Math.min(Date.now(), anchor + tfMs(timeframe) * 20)));
       }
       const res = await fetch(
         `/api/market/klines?${query}`,
@@ -149,6 +165,7 @@ export const HookChart: React.FC<HookChartProps> = ({
         throw new Error(error.error || `Не вдалося завантажити свічки (HTTP ${res.status})`);
       }
       const raw = await res.json();
+      setChartSource(res.headers.get('x-chart-source') || 'h00k-verified');
       if (isDisposedRef.current || controller.signal.aborted) return;
       if (!Array.isArray(raw) || !raw.length) {
         throw new Error('Для цього контракту та періоду свічки відсутні');
@@ -180,7 +197,7 @@ export const HookChart: React.FC<HookChartProps> = ({
         setIsLoading(false);
       }
     }
-  }, [symbol, timeframe, exchange, focusAt, historical]);
+  }, [symbol, timeframe, exchange, focusAt, historical, verifiedOnly, exitTimestamp]);
 
   // Initial fetch on symbol / timeframe change
   useEffect(() => {
@@ -191,37 +208,14 @@ export const HookChart: React.FC<HookChartProps> = ({
     return () => abortControllerRef.current?.abort();
   }, [fetchKlines]);
 
-  // Periodic klines refresh every 3 seconds
+  // Closed verified candles update on minute boundaries, not every 3 seconds.
   useEffect(() => {
-    if (provider !== 'hookchart' || historical) return;
+    if (historical) return;
     const interval = setInterval(() => {
-      if (!isDisposedRef.current && !abortControllerRef.current) {
-        void fetchKlines();
-      }
-    }, 3000);
+      if (!isDisposedRef.current && !abortControllerRef.current) void fetchKlines();
+    }, verifiedOnly ? 15_000 : 3000);
     return () => clearInterval(interval);
-  }, [provider, fetchKlines, historical]);
-
-  // TradingView widget URL
-  const tvInterval = ({ '1m': '1', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '4h': '240', '1d': 'D' } as const)[timeframe];
-  const tvSymbol = `${exchange === 'bybit' ? 'BYBIT' : 'BINANCE'}:${symbol.toUpperCase()}.P`;
-  const tvWidgetUrl = `https://s.tradingview.com/widgetembed/?${new URLSearchParams({
-    symbol: tvSymbol,
-    interval: tvInterval,
-    theme: 'dark',
-    style: '1',
-    timezone: 'exchange',
-    withdateranges: '0',
-    hide_top_toolbar: '0',
-    hide_side_toolbar: '0',
-    allow_symbol_change: '0',
-    save_image: '0',
-    hide_legend: '0',
-    locale: 'uk',
-    toolbar_bg: '#090d16',
-    gridColor: 'rgba(30,41,59,0.3)',
-    gridTransparency: '100',
-  }).toString()}`;
+  }, [fetchKlines, historical, verifiedOnly]);
 
   // Profit/Loss calculation
   const pnlPercent =
@@ -234,7 +228,7 @@ export const HookChart: React.FC<HookChartProps> = ({
 
   return (
     <div
-      className={`rounded-xl border border-slate-800 bg-[#090d16] overflow-hidden flex flex-col font-sans transition-all ${
+      className={`krystianTradeChart rounded-xl border border-slate-800 bg-[#090d16] overflow-hidden flex flex-col font-sans transition-all ${
         isExpanded ? 'fixed inset-3 z-50 shadow-2xl border-cyan-500/50 bg-[#090d16]' : ''
       }`}
       style={{ height: isExpanded ? 'calc(100vh - 24px)' : `${height}px` }}
@@ -264,7 +258,7 @@ export const HookChart: React.FC<HookChartProps> = ({
 
           {/* Formation name */}
           {formationName && (
-            <span className="text-slate-400 text-[11px] hidden md:inline truncate max-w-[150px]">
+            <span className="text-slate-400 text-[11px] truncate max-w-[180px]">
               {formationName}
             </span>
           )}
@@ -307,8 +301,7 @@ export const HookChart: React.FC<HookChartProps> = ({
         {/* Center / Right: Engine Switcher, Drawing Tools, TF, Controls */}
         <div className="flex flex-wrap items-center gap-2">
           {/* Quick Drawing Tools (HookChart Canvas native) */}
-          {provider === 'hookchart' && (
-            <div className="hidden lg:flex items-center gap-0.5 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px]">
+          <div className="hidden lg:flex items-center gap-0.5 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px]">
               <button
                 onClick={() => setActiveTool('cursor')}
                 className={`p-1 rounded cursor-pointer ${
@@ -365,38 +358,10 @@ export const HookChart: React.FC<HookChartProps> = ({
                 <Eraser className="w-3 h-3" />
               </button>
             </div>
-          )}
-
-          {/* Engine Mode Toggle (HookChart vs TradingView as on h00k.top) */}
-          <div className="flex items-center gap-0.5 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px] font-mono">
-            <button
-              onClick={() => setProvider('hookchart')}
-              className={`px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer ${
-                provider === 'hookchart'
-                  ? 'bg-cyan-950 text-cyan-300 border border-cyan-800/50 font-bold'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-              title="Оригінальний Canvas-графік h00k.top"
-            >
-              <Layers className="w-3 h-3 text-cyan-400" />
-              <span>HookChart</span>
-            </button>
-            {!historical && <button
-              onClick={() => setProvider('tradingview')}
-              className={`px-2 py-1 rounded transition-colors cursor-pointer ${
-                provider === 'tradingview'
-                  ? 'bg-slate-800 text-white font-bold'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-              title="TradingView Pro віджет"
-            >
-              <span>TradingView</span>
-            </button>}
-          </div>
 
           {/* Timeframe Switcher */}
           <div className="flex items-center gap-0.5 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px] font-mono">
-            {(['1m', '5m', '15m', '30m', '1h', '4h', '1d'] as Timeframe[]).map((tf) => (
+            {allowedTimeframes.map((tf) => (
               <button
                 key={tf}
                 onClick={() => setTimeframe(tf)}
@@ -412,8 +377,10 @@ export const HookChart: React.FC<HookChartProps> = ({
           </div>
 
           {/* Live P&L badge */}
-          {entryPrice && !historical && (
-            <div className="text-[11px] font-mono flex items-center gap-1 font-semibold pl-1">
+          {entryPrice && !historical && candles.length > 0 && (
+            <div className="text-[11px] font-mono flex items-center gap-1 font-semibold pl-1"
+              title={verifiedOnly ? 'Зміна ціни до останньої закритої свічки, не поточний P&L' : 'Зміна ціни від входу'}>
+              {verifiedOnly && <span className="text-slate-400">Закр. свічка:</span>}
               <span className={isProfit ? 'text-emerald-400' : 'text-rose-400'}>
                 {isProfit ? '+' : ''}
                 {pnlPercent.toFixed(2)}%
@@ -436,14 +403,28 @@ export const HookChart: React.FC<HookChartProps> = ({
         </div>
       </div>
 
-      {/* Main Chart Canvas Stage */}
+      {verifiedOnly && (
+        <div className="px-3 py-1 text-[10px] text-slate-400 border-b border-slate-800 bg-[#0e1319]">
+          {chartSource === 'exchange-readonly'
+            ? 'Реальні закриті свічки біржі для перегляду угоди (не для сигналів)'
+            : 'Перевірені закриті свічки h00k.top'}
+          {' · '}Вхід / TP / SL — рівні алгоритму
+          {historical && !entryInLoadedWindow && (
+            <span className="ml-2 text-amber-300">
+              Вхід був раніше доступних свічок; його час не відображається.
+            </span>
+          )}
+        </div>
+      )}
+      <div className="px-3 py-1 text-[10px] text-slate-400 border-b border-slate-800 bg-[#0e1319]">
+        Навігація: перетягуйте графік пальцем або мишею · два пальці — масштаб · стрілки — раніше / пізніше
+      </div>
+      {/* Native HookChart showing real candles and exact position levels */}
       <div className="flex-1 relative w-full min-h-[180px] overflow-hidden bg-[#131722]">
-        {provider === 'hookchart' ? (
-          <>
             {isLoading && !candles.length && (
               <div className="absolute inset-0 z-20 flex items-center justify-center text-xs font-mono text-slate-400 gap-2 bg-[#131722]/90 backdrop-blur-xs">
                 <RefreshCw className="w-4 h-4 animate-spin text-cyan-400" />
-                <span>Завантаження HookChart ({symbol})...</span>
+                <span>Завантаження реальних свічок HookChart ({symbol})...</span>
               </div>
             )}
             {dataError && (
@@ -464,24 +445,17 @@ export const HookChart: React.FC<HookChartProps> = ({
               takeProfit={takeProfit}
               stopLoss={stopLoss}
               entryTimestamp={entryTimestamp}
+              exitPrice={exitPrice}
+              exitTimestamp={exitTimestamp}
               focusAt={focusAt}
               direction={direction}
               formationName={formationName}
               tool={activeTool}
               showVolumes={true}
+              showAutoLevels={false}
               candleLongColor="#0ECB81"
               candleShortColor="#F6465D"
             />
-          </>
-        ) : (
-          /* TradingView Embed Widget */
-          <iframe
-            src={tvWidgetUrl}
-            title={`TradingView-${symbol}`}
-            className="w-full h-full border-0"
-            allow="fullscreen"
-          />
-        )}
       </div>
 
       {/* Market Stats Bar copied verbatim from h00k.top */}
@@ -531,6 +505,9 @@ export const HookChart: React.FC<HookChartProps> = ({
             )}
             {takeProfit && (
               <span className="text-emerald-400 font-semibold">TP: {takeProfit}</span>
+            )}
+            {Number.isFinite(exitPrice) && (exitPrice ?? 0) > 0 && (
+              <span className="text-amber-300 font-semibold">Вихід: {exitPrice}</span>
             )}
             <a
               href="https://h00k.top"
