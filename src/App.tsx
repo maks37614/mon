@@ -27,6 +27,7 @@ import { paperWarningsText, signalConfirmationLabel, tradeHistoryCsv } from "./t
 import { scanIsOverdue, screenerEmptyState } from "./screenerStatus";
 import { TradingScheduleSettings } from "./components/TradingScheduleSettings";
 import { StrategyBuilder } from "./components/StrategyBuilder";
+import { BacktestPanel } from "./components/BacktestPanel";
 import type { TradingScheduleState } from "../backend/tradingSchedule";
 import "./dashboard.css";
 
@@ -891,6 +892,7 @@ export default function App() {
           { id: "overview", label: "Огляд" },
           ...(!hookMode ? [{ id: "screener", label: "Скрінер" }] : []),
           { id: "builder", label: hookMode ? "Ev-Test" : "Конструктор стратегій" },
+          ...(hookMode ? [{ id: "backtest", label: "Бектест" }] : []),
           { id: "settings", label: "Налаштування" },
           { id: "logs", label: "Журнал" },
         ].map((item) => (
@@ -910,6 +912,7 @@ export default function App() {
             { id: "overview", label: "Огляд торгівлі", Icon: Activity },
             ...(!hookMode ? [{ id: "screener", label: "Скрінер формацій", Icon: BarChart3 }] : []),
             { id: "builder", label: hookMode ? "Ev-Test · сигнали" : "Конструктор стратегій", Icon: Settings2 },
+            ...(hookMode ? [{ id: "backtest", label: "Бектест Ev-Test", Icon: BarChart3 }] : []),
             { id: "settings", label: "Налаштування", Icon: Settings2 },
             { id: "logs", label: "Журнал подій", Icon: Clock3 },
           ].map(({ id, label, Icon }) => (
@@ -942,6 +945,7 @@ export default function App() {
               <h1>
                 {tab === "builder"
                   ? hookMode ? "Ev-Test · сигнали" : "Конструктор стратегій"
+                  : tab === "backtest" ? "Бектест Ev-Test"
                   : tab === "settings"
                   ? "Налаштування термінала"
                   : tab === "screener"
@@ -951,7 +955,8 @@ export default function App() {
                       : "Огляд торгівлі"}
               </h1>
               <p className="muted">
-                {tab === "builder" ? (hookMode ? "Стратегія 1m / 5m · формації та реальний стакан із h00k.top" : "Окремий сканер 1m / 5m · без автоматичних ордерів") : (
+                {tab === "builder" ? (hookMode ? "Стратегія 1m / 5m · формації та реальний стакан із h00k.top" : "Окремий сканер 1m / 5m · без автоматичних ордерів")
+                  : tab === "backtest" ? "Ретроспективний свічковий тест 1m / 5m · Без історичного стакана · Без ордерів" : (
                   <>
                     USDT perpetual · {hookMode ? (live ? "Ev-Test 1m / 5m · Live" : "Ev-Test 1m / 5m · Paper") : s.timeframes.join(" / ")} ·{" "}
                     {s.autoEntries
@@ -1038,6 +1043,8 @@ export default function App() {
           )}
           {tab === "builder" ? (
             <StrategyBuilder hookMode={hookMode} onOpenChart={(signal) => openChart({ ...signal, formation: signal.pattern })} />
+          ) : hookMode && tab === "backtest" ? (
+            <BacktestPanel />
           ) : tab === "settings" ? (
             <SettingsPanel data={data} run={run} />
           ) : tab === "logs" ? (
