@@ -34,6 +34,9 @@ export const DEFAULT_SETTINGS = {
   minScore: 75,
   confirmedOnly: true,
   autoEntries: false,
+  // Reserved for the forthcoming order-flow impulse detector; the current formation engine ignores these flags.
+  impulseFastEnabled: false,
+  impulseConfirmedEnabled: false,
   reverseEnabled: false,
   tradingSchedule: structuredClone(DEFAULT_TRADING_SCHEDULE),
   maxPositions: 5,
@@ -115,7 +118,7 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
     )
       throw new Error(`Параметр ${k}: дозволено ${min}–${max}`);
   }
-  for (const k of ["confirmedOnly", "autoEntries", "reverseEnabled"])
+  for (const k of ["confirmedOnly", "autoEntries", "impulseFastEnabled", "impulseConfirmedEnabled", "reverseEnabled"])
     if (typeof s[k as keyof Settings] !== "boolean")
       throw new Error(`Параметр ${k} має бути логічним`);
   if (!["account", "manual"].includes(s.paperFeeMode)) throw new Error("Невідоме джерело комісії симуляції");
