@@ -907,9 +907,9 @@ export default function App() {
         <main className="main-content">
           <div className="page-heading">
             <div>
-              <div className="eyebrow">
-                {live ? "РЕАЛЬНИЙ РАХУНОК" : "ТЕСТУВАННЯ НА РЕАЛЬНОМУ РИНКУ"}
-              </div>
+              {live && (
+                <div className="eyebrow">РЕАЛЬНИЙ РАХУНОК</div>
+              )}
               <h1>
                 {tab === "settings"
                   ? "Налаштування термінала"
