@@ -13,7 +13,7 @@ const SYMBOL = /^[A-Z0-9]{3,30}USDT$/;
 const LOOKBACK_MS = 30_000;
 const TICKER_MOVE_PCT = 0.55;
 const CANDLE_MOVE_PCT = 0.8;
-const MIN_QUOTE_24H = 2_000_000;
+const MIN_QUOTE_24H = 0;
 const MAX_QUEUE = 30;
 const MAX_HISTORY = 42;
 const VERIFY_INTERVAL_MS = 1_800;
@@ -30,7 +30,7 @@ export function impulseTickerCandidate(
     typeof ticker.s !== "string" || !SYMBOL.test(ticker.s) ||
     !Number.isFinite(ticker.E) || Math.abs(now - ticker.E!) > 10_000) return null;
   const price=Number(ticker.c), quote=Number(ticker.q);
-  if (!Number.isFinite(price) || price<=0 || !Number.isFinite(quote) || quote < MIN_QUOTE_24H) return null;
+  if (!Number.isFinite(price) || price<=0 || !Number.isFinite(quote) || quote <= MIN_QUOTE_24H) return null;
   const first=history.find(p=>p.at <= ticker.E! - 15_000);
   if (!first || first.price<=0) return null;
   const changePct=(price/first.price-1)*100;
