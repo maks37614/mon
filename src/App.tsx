@@ -489,6 +489,40 @@ function SettingsPanel({
             Лише підтверджені формації
           </label>
         </div>
+        <fieldset>
+          <legend>Режими імпульсних входів · підготовка</legend>
+          <p className="muted">
+            Можна увімкнути обидва режими або лише один. Вони зберігаються окремо.
+          </p>
+          <div className="check-row">
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={form.impulseFastEnabled}
+                onChange={(e) =>
+                  setForm({ ...form, impulseFastEnabled: e.target.checked })
+                }
+              />
+              Швидкий вхід · 1–5 секунд
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={form.impulseConfirmedEnabled}
+                onChange={(e) =>
+                  setForm({ ...form, impulseConfirmedEnabled: e.target.checked })
+                }
+              />
+              Вхід після підтвердження · 5–20 секунд
+            </label>
+          </div>
+          <div className="notice">
+            Це підготовчі налаштування: поточний сканер працює за свічковими
+            формаціями. Увімкнення цих перемикачів поки не створює імпульсних
+            сигналів та не змінює реальну торгівлю. Для роботи режимів потрібен
+            окремий секундний детектор потоку угод та контролю ліквідності.
+          </div>
+        </fieldset>
         <TradingScheduleSettings value={form.tradingSchedule}
           onChange={tradingSchedule => setForm({ ...form, tradingSchedule })} />
         <label>
