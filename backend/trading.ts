@@ -96,10 +96,15 @@ export class Trading {
     private gateway: ExchangeGateway,
     readonly liveAllowed: boolean,
     private siteUniverse?: SiteUniverse,
+    private impulseOnly = false,
   ) {}
   settings() {
     const saved = this.store.get<Partial<Settings>>("settings", {});
-    return { ...structuredClone(DEFAULT_SETTINGS), ...saved };
+    const current={ ...structuredClone(DEFAULT_SETTINGS), ...saved };
+    return this.impulseOnly ? {
+      ...current,exchange:"binance" as const,mode:"paper" as const,
+      timeframes:["1m"],formationTypes:["Impulse Breakout"],confirmedOnly:true,
+    } : current;
   }
   private book(mode: Mode) {
     return this.store.get(
@@ -138,6 +143,12 @@ export class Trading {
         throw new Error(
           "Спочатку закрийте позиції та узгодьте очікуючі ордери",
         );
+      if (this.impulseOnly && (next.exchange !== "binance" || next.mode !== "paper" ||
+        next.timeframes.length!==1 || next.timeframes[0]!=="1m" ||
+        next.formationTypes.length!==1 || next.formationTypes[0]!=="Impulse Breakout" ||
+        !next.confirmedOnly)) {
+        throw new Error("AUTO: тільки імпульси Binance Futures, 1m і paper-режим");
+      }
       if (this.siteUniverse && (next.exchange !== "binance" || next.mode !== "paper")) {
         throw new Error("AUTO: дозволено лише Binance Futures та тестові ордери на реальному ринку");
       }
@@ -338,6 +349,10 @@ export class Trading {
     const s = this.settings(),
       b = this.book(s.mode),
       now = Date.now();
+    if (this.impulseOnly && (s.exchange!=="binance" || s.mode!=="paper" ||
+      signal.exchange!=="binance" || signal.formation!=="Impulse Breakout")) {
+      throw new Error("AUTO: дозволені лише тестові Binance імпульси");
+    }
     if (this.siteUniverse && (s.exchange !== "binance" || s.mode !== "paper" ||
       signal.exchange !== "binance" || !this.siteUniverse.allows(signal.symbol))) {
       throw new Error("AUTO: монета не входить у свіжий список 10 активних Binance із h00k.top");

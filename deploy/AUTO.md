@@ -1,53 +1,42 @@
-# Third independent mon bot for auto.h00k.top
+# AUTO MON · Всі Binance USDⓈ-M perpetual · імпульси через WebSocket
 
-This **branch of maks37614/mon** reuses the original mon scanner, formation engine,
-trading / position management, and its real-market paper execution model.
+## Призначення
+Окремий бот на базі `maks37614/mon` у `/home/ubuntu/auto`.
+Не впливає на `h00k.top`, `evgen-mon`, `krystian-mon` і не використовує API сайту.
+Піддомен `auto.h00k.top` працює через існуючий Caddy → `127.0.0.1:3027`.
 
-## Isolation and market sourcing
+## Як визначаються імпульси
+- Один Binance production WebSocket `!ticker@arr` (приблизно 1 раз/с для змінених пар).
+- Активні USDⓈ-M USDT perpetual контракти підтверджуються `/fapi/v1/exchangeInfo`
+  і оновлюються раз на годину; COIN-M та неактивні символи відкидаються.
+- Перша умова: рух >0,55% від ціни щонайменше 15 секунд тому,
+  24-годинний обсяг >2 млн USDT.
+- Потім REST `/fapi/v1/klines` **лише для кандидатів**, не для всіх монет.
+- Підтвердження: поточна 1m свічка рухається >0,8%, пробій діапазону
+  попередніх 20 хвилин, темп обсягу >=2,5x середнього за 20 хв.
+- Ліміт підтверджень: максимум 1 REST-запит раз на ~1,8 с, черга максимум 30;
+  застарілі кандидати відкидаються. Це компроміс швидкості і лімітів Binance.
+- Сигнали за **поточною** 1m свічкою, не за закритою: можливі хибні імпульси та
+  відкат до її закриття. Це реальний ринок, а не історичний backtest.
+- Дані усіх сигналів зберігаються в окремому `auto_mon_data`.
+- Під час падіння WS нові сигнали/входи не створюються; відкриті paper-позиції
+  контролюються окремим price feed mon.
 
-- Deploy only to **/home/ubuntu/auto**; never into /home/ubuntu/mon or /home/ubuntu/h00k.
-- The VPS container **auto-mon** has its own named Docker volume `auto_mon_data`.
-- Existing Caddy `auto.h00k.top` routing to `127.0.0.1:3027` is reused.
-- No edits to h00k.top or any of its containers, files, scans, charts, orderbook, or alerts.
-- The source adapter only reads existing public h00k quotes **once every five minutes at most**.
-  A read necessarily has some small HTTP processing cost; this is not zero load.
-- Only fresh, active, liquid Binance USDT perpetual symbols; up to ten ranked by
-  24h volatility. No fallback to the rest of Binance on source failure.
-- All candles, ticks, mark prices, funding and orderbooks come **directly from the Binance real-market endpoints**.
-- Historical backtests and Binance Testnet are not used.
-- **Only paper mode**, live execution disabled even if credentials exist.
-- Existing paper positions can continue to be monitored if the top ten changes.
+## Безпека
+**Реальні ордери заборонені.** Налаштування прив'язані до Binance / paper / 1m.
+Автоматичні тестові входи спочатку вимкнені; вмикайте після огляду сигналів.
+Для моделі Binance maintenance margin tiers та комісії зі свого акаунта
+оригінальний `mon` може потребувати ключів читання (без права торгівлі).
+Без них індикатор може показувати сигнали, а paper-входи — не відбуватися;
+не підмінюйте відсутні ризикові дані вигаданими.
 
-## Preparation on VPS (do not run on existing bot folders)
-
+## Оновлення на VPS
 ```sh
-cd /home/ubuntu
-git clone --single-branch --branch feature/auto-h00k-top10-binance-paper \
-  https://github.com/maks37614/mon.git auto
-cd auto
-```
-
-Generate a fresh scrypt password hash with the repository's `scripts/password.mjs`,
-which requires Node 24 (the Docker builder supplies Node 24).
-Create the local `.env` using `deploy/.env.auto.example`. Set `ADMIN_PASSWORD_HASH`,
-`ENCRYPTION_KEY` (32 random bytes base64), `CRON_SECRET` (at least 32 random characters).
-Never paste or commit secrets. Use the Compose file `deploy/auto.compose.yaml` from this folder.
-
-**Before switching port 3027**, build and test the new image. Then stop only the
-previous `impulse-hunter` container (NOT `h00k-app-1`, `evgen-mon` or `krystian-mon`),
-bring up only `auto-mon`, verify local health, HTTPS, login, and site source status.
-
-Run with:
-```sh
+cd /home/ubuntu/auto
+git pull --ff-only origin feature/auto-h00k-top10-binance-paper
 docker compose -f deploy/auto.compose.yaml build auto-mon
-docker compose -f deploy/auto.compose.yaml up -d --no-deps auto-mon
+docker compose -f deploy/auto.compose.yaml up -d --no-deps --force-recreate auto-mon
+docker logs --tail 50 auto-mon
+curl -fsS https://auto.h00k.top/healthz
 ```
-
-**Testing real-market conditions** means live exchange prices and simulated fills.
-It does **not** mean transmitting real orders. The original mon Binance paper
-risk-tier model requires a **read-only Binance API key**; do not enable real trading.
-Order execution, margin, orderbook and fee models are approximations and should not
-be mistaken for actual trades. Automatic entries remain off by default until the
-operator enables them in the authenticated UI.
-
-The original `mon` project is untouched on its main branch, as are other running bots.
+Не використовуйте `docker compose down -v` — він видалить тестову історію.

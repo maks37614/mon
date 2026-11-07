@@ -14,6 +14,7 @@ import { Trading } from "./backend/trading";
 import { ExchangeGateway, exchangeError } from "./backend/exchange";
 import { DEFAULT_SETTINGS, type Exchange } from "./backend/config";
 import { SiteUniverse } from "./backend/siteUniverse";
+import { ImpulseMonitor } from "./backend/impulseMonitor";
 
 type Options = {
   directory: string;
@@ -28,6 +29,7 @@ type Options = {
   gatewayFactory?: any;
   weightBudget?: number;
   autoSiteMode?: boolean;
+  autoImpulseMode?: boolean;
 };
 const route =
   (fn: (req: Request, res: Response) => unknown) =>
@@ -53,15 +55,27 @@ export function createApplication(options: Options) {
     throw new Error("CRON_SECRET має містити щонайменше 32 випадкові символи");
   const store = new Store(options.directory),
     vault = new Vault(store, options.encryptionKey);
+  if (options.autoImpulseMode && !store.get("auto:impulse:initialized",false)) {
+    const saved=store.get<any>("settings",{});
+    store.set("settings",{...DEFAULT_SETTINGS,...saved,exchange:"binance",mode:"paper",
+      timeframes:["1m"],formationTypes:["Impulse Breakout"],
+      confirmedOnly:true,minScore:75,autoEntries:false,
+      entryIntervalSeconds:5,maxSignalAgeSeconds:90});
+    store.set("signals",[]);
+    store.set("auto:impulse:initialized",true);
+  }
   const market = new MarketData(
     () => store.get("settings", DEFAULT_SETTINGS),
     options.fetcher,
     options.weightBudget,
   );
-  if (options.autoSiteMode && options.liveAllowed) {
+  if ((options.autoSiteMode || options.autoImpulseMode) && options.liveAllowed) {
     throw new Error("AUTO_H00K_TOP10: реальні ордери вимкнені");
   }
-  const siteUniverse = options.autoSiteMode ? new SiteUniverse(options.fetcher) : undefined;
+  const siteUniverse = options.autoSiteMode && !options.autoImpulseMode ?
+    new SiteUniverse(options.fetcher) : undefined;
+  const impulseMonitor = options.autoImpulseMode ?
+    new ImpulseMonitor(store, market) : undefined;
   const scanner = new Scanner(store, market, siteUniverse),
     gateway = new ExchangeGateway(vault, options.gatewayFactory);
   const trading = new Trading(
@@ -69,8 +83,9 @@ export function createApplication(options: Options) {
     market,
     vault,
     gateway,
-    options.liveAllowed === true && !options.autoSiteMode,
+    options.liveAllowed === true && !options.autoSiteMode && !options.autoImpulseMode,
     siteUniverse,
+    options.autoImpulseMode === true,
   );
   const auth = new Auth(
     store,
@@ -104,7 +119,7 @@ export function createApplication(options: Options) {
       !safeEqual(req.get("authorization") || "", `Bearer ${options.cronSecret}`)
     )
       return res.status(401).json({ error: "Unauthorized" });
-    const result = scanner.start(false, "cron");
+    const result = options.autoImpulseMode ? {accepted:false,reason:"WebSocket impulse mode"} : scanner.start(false, "cron");
     res.status(result.accepted ? 202 : 200).json(result);
   });
   app.use(
@@ -140,6 +155,7 @@ export function createApplication(options: Options) {
       schedulerMode: options.schedulerMode || "external",
       formationCount: DEFAULT_SETTINGS.formationTypes.length,
       siteUniverse: siteUniverse?.status() || null,
+      impulseStatus: impulseMonitor?.status() || null,
     });
   });
   app.put(
@@ -170,7 +186,7 @@ export function createApplication(options: Options) {
     }),
   );
   app.post("/api/scan", (_req, res) => {
-    const result = scanner.start();
+    const result = options.autoImpulseMode ? {accepted:false,reason:"WebSocket impulse mode"} : scanner.start();
     res.status(result.accepted ? 202 : 200).json(result);
   });
   const exchangeParam = (req: Request): Exchange => {
@@ -306,13 +322,18 @@ export function createApplication(options: Options) {
     market,
     scanner,
     gateway,
+    impulseMonitor,
     start() {
       trading.start();
-      if (options.schedulerMode === "internal")
+      if (impulseMonitor) void impulseMonitor.start().catch(e=>{
+        store.log("WARN","WebSocket імпульсів: "+String(e.message).slice(0,100));
+      });
+      else if (options.schedulerMode === "internal")
         scheduler = setInterval(() => scanner.start(false, "internal"), 10_000);
     },
     async stop() {
       if (scheduler) clearInterval(scheduler);
+      impulseMonitor?.stop();
       await trading.stop();
       if (scanner.task) await scanner.task;
       store.close();
@@ -332,6 +353,7 @@ async function main() {
     schedulerMode: process.env.SCHEDULER_MODE || "external",
     weightBudget: Number(process.env.BINANCE_WEIGHT_BUDGET || 1000),
     autoSiteMode: process.env.AUTO_H00K_TOP10 === "true",
+    autoImpulseMode: process.env.AUTO_IMPULSE_ALL === "true",
   });
   const host = process.env.HOST || "127.0.0.1",
     port = Number(process.env.PORT || 3010);
