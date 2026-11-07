@@ -44,6 +44,7 @@ type Snapshot = {
   liveAllowed: boolean;
   schedulerMode: string;
   apiPauses: Record<string, number>;
+  siteUniverse?: { selected: string[]; fresh: boolean; lastSuccess: number | null; error: string | null } | null;
 };
 type ChartSelection = HookChartProps & { id: string; historical: boolean };
 const money = (n: number) =>
@@ -418,7 +419,7 @@ function SettingsPanel({
               }
             >
               <option value="binance">Binance · USDT perpetual</option>
-              <option value="bybit">Bybit · USDT perpetual</option>
+              <option value="bybit" disabled={Boolean(data.siteUniverse)}>Bybit · USDT perpetual</option>
             </select>
           </label>
           <label>
@@ -523,11 +524,11 @@ function SettingsPanel({
           ))}
         </div>
         <div className="divider" />
-        <h2>Сканування всіх монет</h2>
+        <h2>{data.siteUniverse ? "Сканування до 10 активних монет h00k.top" : "Сканування всіх монет"}</h2>
         <p className="muted">
-          Усі активні USDT perpetual контракти вибраної біржі. Черга
-          обробляється пакетами; нові монети додаються автоматично. Додавання
-          таймфреймів збільшує час повного проходу.
+          {data.siteUniverse
+            ? "Тільки свіжі активні Binance Futures із h00k.top. Оновлення списку — не частіше одного разу на 5 хвилин. Свічки та ціни надходять безпосередньо з Binance."
+            : "Усі активні USDT perpetual контракти вибраної біржі. Черга обробляється пакетами; нові монети додаються автоматично. Додавання таймфреймів збільшує час повного проходу."}
         </p>
         <fieldset>
           <legend>Таймфрейми</legend>
@@ -621,7 +622,7 @@ function SettingsPanel({
           <KeyRound size={22} />
         </div>
         <div className="credentials-grid">
-          {["binance", "bybit"].map((exchange) => (
+          {(data.siteUniverse ? ["binance"] : ["binance", "bybit"]).map((exchange) => (
             <Credentials
               key={exchange}
               exchange={exchange}
@@ -987,6 +988,17 @@ export default function App() {
               >
                 Синхронізувати
               </button>
+            </div>
+          )}
+          {data.siteUniverse && (
+            <div className={`notice ${data.siteUniverse.fresh ? "success" : "error"}`}>
+              <strong>h00k.top → Binance Futures · до 10 активних монет</strong>
+              <p>
+                {data.siteUniverse.fresh
+                  ? "Джерело активне. Вибрані монети: " + data.siteUniverse.selected.join(", ")
+                  : "Нові входи заблоковані: " + (data.siteUniverse.error || "очікуємо свіжий список від сайту")}
+              </p>
+              <small>Поточний ринок Binance · paper-режим без реальних ордерів</small>
             </div>
           )}
           {Object.entries(data.apiPauses)
