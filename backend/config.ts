@@ -44,7 +44,7 @@ export const DEFAULT_SETTINGS = {
   stopLossPercent: 0.25,
   slippageTolerancePercent: 0.2,
   takerFeePercent: 0.06,
-  paperFeeMode: "manual" as "account" | "manual",
+  paperFeeMode: "account" as "account" | "manual",
   paperLatencyMs: 200,
 };
 export const tfMs = (tf: string) =>
