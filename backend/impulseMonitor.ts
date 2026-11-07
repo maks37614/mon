@@ -110,6 +110,10 @@ export class ImpulseMonitor {
     private socketFactory:(url:string)=>Socket = url=>new WebSocket(url),
     private now:()=>number = Date.now,
   ) {}
+  isFresh():boolean {
+    return this.keepRunning && this.state==="live" && this.lastMessage>0 &&
+      this.now()-this.lastMessage<10_000;
+  }
   status() {
     return {state:this.state,source:"Binance USDT perpetual live",
       transport:"WebSocket !ticker@arr + Binance 1m REST confirmation",
@@ -121,6 +125,7 @@ export class ImpulseMonitor {
     if(this.keepRunning)return;
     this.keepRunning=true;
     this.state="connecting";
+    this.store.set("signals",[]);
     try {await this.refreshMarkets();}
     catch(e:any){this.lastError=String(e.message||e);this.log("Не вдалося отримати Binance Futures markets: "+this.lastError);}
     if(!this.keepRunning)return;

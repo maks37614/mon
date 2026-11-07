@@ -97,6 +97,7 @@ export class Trading {
     readonly liveAllowed: boolean,
     private siteUniverse?: SiteUniverse,
     private impulseOnly = false,
+    private impulseStreamLive?: () => boolean,
   ) {}
   settings() {
     const saved = this.store.get<Partial<Settings>>("settings", {});
@@ -216,9 +217,11 @@ export class Trading {
         winRate: history.length ? (wins / history.length) * 100 : 0,
         accountAt: b.accountAt || null,
       },
-      signals: formations.filter((signal) => signalAllowsEntry(signal, s, now)),
+      signals: formations.filter((signal) => signalAllowsEntry(signal, s, now) &&
+        (!this.impulseOnly || this.impulseStreamLive?.() === true)),
       formations: formations.map((signal) => ({
-        ...signal, canEnter: signalAllowsEntry(signal, s, now),
+        ...signal, canEnter: signalAllowsEntry(signal, s, now) &&
+          (!this.impulseOnly || this.impulseStreamLive?.() === true),
       })),
       scanner: this.store.get<any>("scanner", {}),
       logs: this.store.get<any[]>("logs", []),
@@ -353,6 +356,8 @@ export class Trading {
       signal.exchange!=="binance" || signal.formation!=="Impulse Breakout")) {
       throw new Error("AUTO: дозволені лише тестові Binance імпульси");
     }
+    if (this.impulseOnly && this.impulseStreamLive?.() !== true)
+      throw new Error("AUTO: WebSocket недоступний, нові входи заблоковані");
     if (this.siteUniverse && (s.exchange !== "binance" || s.mode !== "paper" ||
       signal.exchange !== "binance" || !this.siteUniverse.allows(signal.symbol))) {
       throw new Error("AUTO: монета не входить у свіжий список 10 активних Binance із h00k.top");

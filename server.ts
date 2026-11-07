@@ -86,6 +86,7 @@ export function createApplication(options: Options) {
     options.liveAllowed === true && !options.autoSiteMode && !options.autoImpulseMode,
     siteUniverse,
     options.autoImpulseMode === true,
+    () => impulseMonitor?.isFresh() === true,
   );
   const auth = new Auth(
     store,
