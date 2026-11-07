@@ -105,6 +105,8 @@ export class Trading {
     return this.impulseOnly ? {
       ...current,exchange:"binance" as const,mode:"paper" as const,
       timeframes:["1m"],formationTypes:["Impulse Breakout"],confirmedOnly:true,
+      minScore:75,maxSignalAgeSeconds:Math.min(current.maxSignalAgeSeconds,45),
+      reverseEnabled:false,tradingSchedule:{enabled:false,windows:[]},
     } : current;
   }
   private book(mode: Mode) {
