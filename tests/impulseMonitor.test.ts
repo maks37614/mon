@@ -4,6 +4,10 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 import { Store } from "../backend/store";
+import { Trading } from "../backend/trading";
+import { Vault } from "../backend/security";
+import { DEFAULT_SETTINGS, FORMATION_ANALYSIS_VERSION } from "../backend/config";
+import { randomBytes } from "node:crypto";
 import { IMPULSE_STREAM_URL, ImpulseMonitor, confirmImpulse, impulseTickerCandidate } from "../backend/impulseMonitor";
 
 const now=1_800_000_030_000;
@@ -125,4 +129,25 @@ test("monitor uses one Binance websocket, filters inactive/non-USDT/COIN-M, and 
   assert.equal(m.status().tracked,2); // Both active futures are tracked, even if only one triggers.
   m.stop();
   assert.equal(m.status().state,"stopped");
+});
+
+test("stale websocket prevents BOTH manual and automatic entries even if previous signal remains",async t=>{
+  const dir=mkdtempSync(path.join(process.cwd(),".test-impulse-"));
+  const store=new Store(dir);
+  t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true});});
+  store.set("settings",{...DEFAULT_SETTINGS,mode:"paper",exchange:"binance",
+    timeframes:["1m"],formationTypes:["Impulse Breakout"],maxSignalAgeSeconds:45});
+  const signal={
+    id:"impulse-one",exchange:"binance",symbol:"BTCUSDT",timeframe:"1m",
+    formation:"Impulse Breakout",direction:"LONG",entryPrice:100,currentPrice:100,
+    stopLoss:99,takeProfit:101,confidence:95,analysisVersion:FORMATION_ANALYSIS_VERSION,
+    status:"confirmed",candleAt:Date.now()-1000,detectedAt:Date.now(),
+    description:"live test",
+  };
+  store.set("signals",[signal]);
+  const trading=new Trading(store,{} as any,
+    new Vault(store,randomBytes(32).toString("base64")),{} as any,false,undefined,true,()=>false);
+  assert.equal(trading.snapshot().signals.length,0);
+  assert.equal(trading.snapshot().formations[0].canEnter,false);
+  await assert.rejects(trading.enter("impulse-one"),/WebSocket недоступний/);
 });

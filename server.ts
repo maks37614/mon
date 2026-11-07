@@ -60,7 +60,7 @@ export function createApplication(options: Options) {
     store.set("settings",{...DEFAULT_SETTINGS,...saved,exchange:"binance",mode:"paper",
       timeframes:["1m"],formationTypes:["Impulse Breakout"],
       confirmedOnly:true,minScore:75,autoEntries:false,
-      entryIntervalSeconds:5,maxSignalAgeSeconds:90});
+      entryIntervalSeconds:5,maxSignalAgeSeconds:45});
     store.set("signals",[]);
     store.set("auto:impulse:initialized",true);
   }
