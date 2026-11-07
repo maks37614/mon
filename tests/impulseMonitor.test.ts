@@ -122,7 +122,7 @@ test("monitor uses one Binance websocket, filters inactive/non-USDT/COIN-M, and 
   const signals=store.get<any[]>("signals",[]);
   assert.equal(signals.length,1);
   assert.equal(signals[0].symbol,"COINUSDT");
-  assert.equal(m.status().tracked,1);
+  assert.equal(m.status().tracked,2); // Both active futures are tracked, even if only one triggers.
   m.stop();
   assert.equal(m.status().state,"stopped");
 });
