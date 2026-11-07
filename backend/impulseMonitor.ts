@@ -99,6 +99,7 @@ export class ImpulseMonitor {
   private verifying=false;
   private lastVerify=0;
   private lastMessage=0;
+  private connectedAt=0;
   private reconnectAttempts=0;
   private state:"stopped"|"connecting"|"live"|"reconnecting"="stopped";
   private lastError:string | null=null;
@@ -131,7 +132,8 @@ export class ImpulseMonitor {
     if(!this.keepRunning)return;
     this.connect();
     this.watchdog=setInterval(()=>{
-      if(this.state==="live" && this.now()-this.lastMessage>MONITOR_TIMEOUT_MS) {
+      if((this.state==="live" && this.now()-this.lastMessage>MONITOR_TIMEOUT_MS) ||
+         (this.state==="connecting" && this.now()-this.connectedAt>MONITOR_TIMEOUT_MS)) {
         this.log("Binance WebSocket не отримує оновлень; перепідключення");
         this.socket?.close();
         this.reconnect();
@@ -179,6 +181,7 @@ export class ImpulseMonitor {
   private connect(){
     if(!this.keepRunning)return;
     this.state="connecting";
+    this.connectedAt=this.now();
     let sock:Socket;
     try{sock=this.socketFactory(IMPULSE_STREAM_URL);}
     catch(e:any){this.lastError=String(e.message||e);this.reconnect();return;}
