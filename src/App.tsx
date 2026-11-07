@@ -44,6 +44,8 @@ type Snapshot = {
   liveAllowed: boolean;
   schedulerMode: string;
   apiPauses: Record<string, number>;
+  impulseStatus?: {state:string; markets:number; tracked:number; queue:number; found:number; lastMessage:number|null; error:string|null}|null;
+  siteUniverse?: { selected: string[]; fresh: boolean; lastSuccess: number | null; error: string | null } | null;
 };
 type ChartSelection = HookChartProps & { id: string; historical: boolean };
 const money = (n: number) =>
@@ -358,6 +360,84 @@ function Credentials({
   );
 }
 
+function AutoSettingsPanel({data,run}: {
+  data:Snapshot;
+  run:(fn:()=>Promise<any>,message?:string)=>Promise<boolean>;
+}) {
+  const [form,setForm]=useState<Settings>({...data.settings});
+  const [currentPassword,setCurrentPassword]=useState("");
+  const [newPassword,setNewPassword]=useState("");
+  const fields:{key:"orderNotionalUsdt"|"maxPositions"|"takeProfitPercent"|"stopLossPercent"|"entryCooldownSeconds";label:string;min:number;max:number;step:number}[]=[
+    {key:"orderNotionalUsdt",label:"Сума тестового входу, USDT",min:5,max:100000,step:1},
+    {key:"maxPositions",label:"Максимум позицій",min:1,max:20,step:1},
+    {key:"takeProfitPercent",label:"Take Profit, %",min:0.05,max:50,step:0.05},
+    {key:"stopLossPercent",label:"Stop Loss, %",min:0.05,max:25,step:0.05},
+    {key:"entryCooldownSeconds",label:"Пауза між входами по монеті, с",min:0,max:86400,step:30},
+  ];
+  return (
+    <div className="settings-stack">
+      <form className="panel" onSubmit={event=>{
+        event.preventDefault();
+        void run(()=>api("/api/settings",{settings:{...data.settings,
+          autoEntries:form.autoEntries,
+          orderNotionalUsdt:form.orderNotionalUsdt,
+          maxPositions:form.maxPositions,
+          takeProfitPercent:form.takeProfitPercent,
+          stopLossPercent:form.stopLossPercent,
+          entryCooldownSeconds:form.entryCooldownSeconds,
+        }},"PUT"),"Параметри тестової торгівлі збережено");
+      }}>
+        <div className="section-heading">
+          <div><h2>Імпульсний бот Binance</h2>
+            <p className="muted">Усі активні USDT Futures · WebSocket · реальні котирування · тестові позиції</p></div>
+          <button className="primary" type="submit">Зберегти</button>
+        </div>
+        <div className="notice">Пошук монет, таймфрейм 1m, підтвердження імпульсів і захист від реальних ордерів налаштовані автоматично.</div>
+        <label className="check">
+          <input type="checkbox" checked={form.autoEntries}
+            onChange={event=>setForm(prev=>({...prev,autoEntries:event.target.checked}))}/>
+          Автоматично відкривати тестові позиції за імпульсами
+        </label>
+        <div className="form-grid">
+          {fields.map(field=><label key={field.key}>
+            {field.label}
+            <input type="number" min={field.min} max={field.max} step={field.step} required
+              value={form[field.key]}
+              onChange={event=>setForm(prev=>({...prev,[field.key]:Number(event.target.value)}))}/>
+          </label>)}
+        </div>
+        <button className="primary" type="submit">Зберегти налаштування</button>
+        <p className="muted">Автовходи за замовчуванням вимкнені. Перед увімкненням перевірте сигнали. Для точної моделі маржі Binance можуть знадобитися API-ключі лише на читання.</p>
+      </form>
+      <details className="panel">
+        <summary>Додатково: Binance API для моделі комісій і маржі</summary>
+        <p className="muted">Використовуйте лише ключ із правами читання. Не надавайте право торгівлі чи виведення коштів.</p>
+        <Credentials exchange="binance" status={data.credentials.binance} run={run}/>
+      </details>
+      <section className="panel">
+        <h2>Пароль панелі</h2>
+        <form className="form-grid password-form" onSubmit={async event=>{
+          event.preventDefault();
+          if(await run(async()=>{
+            const result=await api("/api/auth/password",{currentPassword,newPassword});
+            setCsrf(result.csrf);
+          },"Пароль змінено")){
+            setCurrentPassword("");setNewPassword("");
+          }
+        }}>
+          <label>Поточний пароль
+            <input type="password" autoComplete="current-password" required value={currentPassword}
+              onChange={event=>setCurrentPassword(event.target.value)}/></label>
+          <label>Новий пароль (12–256 символів)
+            <input type="password" autoComplete="new-password" minLength={12} maxLength={256} required
+              value={newPassword} onChange={event=>setNewPassword(event.target.value)}/></label>
+          <button type="submit">Змінити пароль</button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function SettingsPanel({
   data,
   run,
@@ -418,7 +498,7 @@ function SettingsPanel({
               }
             >
               <option value="binance">Binance · USDT perpetual</option>
-              <option value="bybit">Bybit · USDT perpetual</option>
+              <option value="bybit" disabled={Boolean(data.siteUniverse)}>Bybit · USDT perpetual</option>
             </select>
           </label>
           <label>
@@ -523,11 +603,11 @@ function SettingsPanel({
           ))}
         </div>
         <div className="divider" />
-        <h2>Сканування всіх монет</h2>
+        <h2>{data.siteUniverse ? "Сканування до 10 активних монет h00k.top" : "Сканування всіх монет"}</h2>
         <p className="muted">
-          Усі активні USDT perpetual контракти вибраної біржі. Черга
-          обробляється пакетами; нові монети додаються автоматично. Додавання
-          таймфреймів збільшує час повного проходу.
+          {data.siteUniverse
+            ? "Тільки свіжі активні Binance Futures із h00k.top. Оновлення списку — не частіше одного разу на 5 хвилин. Свічки та ціни надходять безпосередньо з Binance."
+            : "Усі активні USDT perpetual контракти вибраної біржі. Черга обробляється пакетами; нові монети додаються автоматично. Додавання таймфреймів збільшує час повного проходу."}
         </p>
         <fieldset>
           <legend>Таймфрейми</legend>
@@ -621,7 +701,7 @@ function SettingsPanel({
           <KeyRound size={22} />
         </div>
         <div className="credentials-grid">
-          {["binance", "bybit"].map((exchange) => (
+          {(data.siteUniverse ? ["binance"] : ["binance", "bybit"]).map((exchange) => (
             <Credentials
               key={exchange}
               exchange={exchange}
@@ -864,7 +944,7 @@ export default function App() {
       <nav className="mobile-nav" aria-label="Основна навігація">
         {[
           { id: "overview", label: "Огляд" },
-          { id: "screener", label: "Скрінер" },
+          { id: "screener", label: data.impulseStatus ? "Імпульси" : "Скрінер" },
           { id: "settings", label: "Налаштування" },
           { id: "logs", label: "Журнал" },
         ].map((item) => (
@@ -882,7 +962,7 @@ export default function App() {
           <div className="eyebrow">РОБОЧИЙ ПРОСТІР</div>
           {[
             { id: "overview", label: "Огляд торгівлі", Icon: Activity },
-            { id: "screener", label: "Скрінер формацій", Icon: BarChart3 },
+            { id: "screener", label: data.impulseStatus ? "Імпульси · WebSocket" : "Скрінер формацій", Icon: BarChart3 },
             { id: "settings", label: "Налаштування", Icon: Settings2 },
             { id: "logs", label: "Журнал подій", Icon: Clock3 },
           ].map(({ id, label, Icon }) => (
@@ -914,7 +994,7 @@ export default function App() {
                 {tab === "settings"
                   ? "Налаштування термінала"
                   : tab === "screener"
-                    ? "Формації на всьому ринку"
+                    ? data.impulseStatus ? "Імпульси Binance Futures" : "Формації на всьому ринку"
                     : tab === "logs"
                       ? "Журнал подій"
                       : "Огляд торгівлі"}
@@ -928,6 +1008,7 @@ export default function App() {
                   : "Автоматичні входи на паузі"}
               </p>
             </div>
+            {!data.impulseStatus && (
             <button
               disabled={busy || scan.running}
               onClick={() =>
@@ -945,6 +1026,7 @@ export default function App() {
               <RefreshCw size={16} className={scan.running ? "spinning" : ""} />
               {scan.running ? "Скануємо…" : "Сканувати пакет"}
             </button>
+            )}
           </div>
           {data.entrySchedule?.enabled && (
             <div className="notice schedule-banner" role="status">
@@ -989,6 +1071,25 @@ export default function App() {
               </button>
             </div>
           )}
+          {data.impulseStatus && (
+            <div className={`notice ${data.impulseStatus.state==="live" ? "success" : "error"}`}>
+              <strong>Binance WebSocket: {data.impulseStatus.state==="live" ? "підключено" : "перепідключення"}</strong>
+              <p>Активних ф'ючерсів: {data.impulseStatus.markets}. Отримано тікери: {data.impulseStatus.tracked}. Підтверджені імпульси: {data.impulseStatus.found}.</p>
+              {data.impulseStatus.error && <p>{data.impulseStatus.error}</p>}
+              <small>Поточні дані Binance. h00k.top не використовується для сканування.</small>
+            </div>
+          )}
+          {data.siteUniverse && (
+            <div className={`notice ${data.siteUniverse.fresh ? "success" : "error"}`}>
+              <strong>h00k.top → Binance Futures · до 10 активних монет</strong>
+              <p>
+                {data.siteUniverse.fresh
+                  ? "Джерело активне. Вибрані монети: " + data.siteUniverse.selected.join(", ")
+                  : "Нові входи заблоковані: " + (data.siteUniverse.error || "очікуємо свіжий список від сайту")}
+              </p>
+              <small>Поточний ринок Binance · paper-режим без реальних ордерів</small>
+            </div>
+          )}
           {Object.entries(data.apiPauses)
             .filter(([, at]) => at > Date.now())
             .map(([exchange, at]) => (
@@ -997,7 +1098,7 @@ export default function App() {
               </div>
             ))}
           {tab === "settings" ? (
-            <SettingsPanel data={data} run={run} />
+            data.impulseStatus ? <AutoSettingsPanel data={data} run={run} /> : <SettingsPanel data={data} run={run} />
           ) : tab === "logs" ? (
             <section className="panel">
               <div className="section-heading">
@@ -1073,6 +1174,22 @@ export default function App() {
                   </div>
                 ))}
               </div>
+              {data.impulseStatus ? (
+                <section className="panel coverage-panel">
+                  <div><div className="section-heading">
+                    <h2>Весь Binance USDT Futures</h2>
+                    <span className={`pill ${data.impulseStatus.state==="live"?"positive":""}`}>
+                      {data.impulseStatus.state==="live"?"WebSocket активний":"Очікуємо з'єднання"}
+                    </span></div>
+                    <div className="coverage-values">
+                      <span><strong>{data.impulseStatus.markets}</strong> контрактів</span>
+                      <span><strong>{data.impulseStatus.tracked}</strong> монет із тікерами</span>
+                      <span><strong>{data.impulseStatus.found}</strong> підтверджених імпульсів</span>
+                    </div>
+                    <p className="muted">Оновлення приблизно 1 с, підтвердження через Binance 1m свічки. Останні дані: {date(data.impulseStatus.lastMessage ?? undefined)}</p>
+                  </div>
+                </section>
+              ) : (
               <section className="panel coverage-panel">
                 <div>
                   <div className="section-heading">
@@ -1132,6 +1249,7 @@ export default function App() {
                   )}
                 </div>
               </section>
+              )}
               {tab === "overview" && (
                 <>
                   <section className="panel">
@@ -1349,7 +1467,7 @@ export default function App() {
                   <div className="section-heading">
                     <div>
                       <h2>
-                        Свіжі формації{" "}
+                        {data.impulseStatus ? "Імпульси ринку" : "Свіжі формації"}{" "}
                         <span className="muted">{signals.length}</span>
                       </h2>
                       <p className="muted">
@@ -1372,7 +1490,7 @@ export default function App() {
                       onChange={(e) => setQuery(e.target.value)}
                     />
                   </div>
-                  {scanOverdue && (
+                  {!data.impulseStatus && scanOverdue && (
                     <div role="status" className="notice">
                       Сканування не оновлюється регулярно. Перевірте {data.schedulerMode === "external" ? "завдання cron-job.org" : "внутрішній розклад"}; останній пакет завершено {date(scan.finishedAt)}.
                     </div>

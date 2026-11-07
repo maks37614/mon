@@ -16,6 +16,7 @@ import type { MarketData } from "./market";
 import type { Vault } from "./security";
 import { depthFill, liquidationPrice, liquidatable, validTiers, type PaperState } from "./paperModel";
 import { PaperFeed, type PriceTick } from "./paperFeed";
+import type { SiteUniverse } from "./siteUniverse";
 import {
   ExchangeGateway,
   definitiveRejection,
@@ -94,10 +95,19 @@ export class Trading {
     private vault: Vault,
     private gateway: ExchangeGateway,
     readonly liveAllowed: boolean,
+    private siteUniverse?: SiteUniverse,
+    private impulseOnly = false,
+    private impulseStreamLive?: () => boolean,
   ) {}
   settings() {
     const saved = this.store.get<Partial<Settings>>("settings", {});
-    return { ...structuredClone(DEFAULT_SETTINGS), ...saved };
+    const current={ ...structuredClone(DEFAULT_SETTINGS), ...saved };
+    return this.impulseOnly ? {
+      ...current,exchange:"binance" as const,mode:"paper" as const,
+      timeframes:["1m"],formationTypes:["Impulse Breakout"],confirmedOnly:true,
+      minScore:75,maxSignalAgeSeconds:Math.min(current.maxSignalAgeSeconds,45),
+      reverseEnabled:false,tradingSchedule:{enabled:false,windows:[]},
+    } : current;
   }
   private book(mode: Mode) {
     return this.store.get(
@@ -136,6 +146,15 @@ export class Trading {
         throw new Error(
           "Спочатку закрийте позиції та узгодьте очікуючі ордери",
         );
+      if (this.impulseOnly && (next.exchange !== "binance" || next.mode !== "paper" ||
+        next.timeframes.length!==1 || next.timeframes[0]!=="1m" ||
+        next.formationTypes.length!==1 || next.formationTypes[0]!=="Impulse Breakout" ||
+        !next.confirmedOnly)) {
+        throw new Error("AUTO: тільки імпульси Binance Futures, 1m і paper-режим");
+      }
+      if (this.siteUniverse && (next.exchange !== "binance" || next.mode !== "paper")) {
+        throw new Error("AUTO: дозволено лише Binance Futures та тестові ордери на реальному ринку");
+      }
       if (next.mode === "live") {
         if (!this.liveAllowed)
           throw new Error(
@@ -171,7 +190,8 @@ export class Trading {
       wins = history.filter((t) => t.netPnl > 0).length;
     const now = Date.now();
     const formations = this.store.get<Signal[]>("signals", [])
-      .filter((signal) => formationIsVisible(signal, s, now));
+      .filter((signal) => formationIsVisible(signal, s, now) &&
+        (!this.siteUniverse || this.siteUniverse.allows(signal.symbol)));
     return {
       settings: s,
       entrySchedule: tradingScheduleState(s.tradingSchedule, now),
@@ -199,9 +219,11 @@ export class Trading {
         winRate: history.length ? (wins / history.length) * 100 : 0,
         accountAt: b.accountAt || null,
       },
-      signals: formations.filter((signal) => signalAllowsEntry(signal, s, now)),
+      signals: formations.filter((signal) => signalAllowsEntry(signal, s, now) &&
+        (!this.impulseOnly || this.impulseStreamLive?.() === true)),
       formations: formations.map((signal) => ({
-        ...signal, canEnter: signalAllowsEntry(signal, s, now),
+        ...signal, canEnter: signalAllowsEntry(signal, s, now) &&
+          (!this.impulseOnly || this.impulseStreamLive?.() === true),
       })),
       scanner: this.store.get<any>("scanner", {}),
       logs: this.store.get<any[]>("logs", []),
@@ -332,6 +354,16 @@ export class Trading {
     const s = this.settings(),
       b = this.book(s.mode),
       now = Date.now();
+    if (this.impulseOnly && (s.exchange!=="binance" || s.mode!=="paper" ||
+      signal.exchange!=="binance" || signal.formation!=="Impulse Breakout")) {
+      throw new Error("AUTO: дозволені лише тестові Binance імпульси");
+    }
+    if (this.impulseOnly && this.impulseStreamLive?.() !== true)
+      throw new Error("AUTO: WebSocket недоступний, нові входи заблоковані");
+    if (this.siteUniverse && (s.exchange !== "binance" || s.mode !== "paper" ||
+      signal.exchange !== "binance" || !this.siteUniverse.allows(signal.symbol))) {
+      throw new Error("AUTO: монета не входить у свіжий список 10 активних Binance із h00k.top");
+    }
     if (automatic && (!s.autoEntries || !tradingScheduleState(s.tradingSchedule, now).allowed))
       throw new Error("Автоматичні входи призупинено або зараз поза торговим розкладом");
     if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !Number.isInteger(signal.confidence) ||

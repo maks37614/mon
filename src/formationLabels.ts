@@ -10,4 +10,5 @@ export const FORMATION_LABELS_UK: Readonly<Record<string, string>> = {
   "Falling Wedge": "Низхідний клин",
   "Bull Flag": "Бичачий прапор",
   "Bear Flag": "Ведмежий прапор",
+  "Impulse Breakout": "Імпульсний пробій",
 };
