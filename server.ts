@@ -13,6 +13,7 @@ import { Scanner } from "./backend/scanner";
 import { Trading } from "./backend/trading";
 import { ExchangeGateway, exchangeError } from "./backend/exchange";
 import { DEFAULT_SETTINGS, type Exchange } from "./backend/config";
+import { SiteUniverse } from "./backend/siteUniverse";
 
 type Options = {
   directory: string;
@@ -26,6 +27,7 @@ type Options = {
   fetcher?: typeof fetch;
   gatewayFactory?: any;
   weightBudget?: number;
+  autoSiteMode?: boolean;
 };
 const route =
   (fn: (req: Request, res: Response) => unknown) =>
@@ -56,14 +58,19 @@ export function createApplication(options: Options) {
     options.fetcher,
     options.weightBudget,
   );
-  const scanner = new Scanner(store, market),
+  if (options.autoSiteMode && options.liveAllowed) {
+    throw new Error("AUTO_H00K_TOP10: реальні ордери вимкнені");
+  }
+  const siteUniverse = options.autoSiteMode ? new SiteUniverse(options.fetcher) : undefined;
+  const scanner = new Scanner(store, market, siteUniverse),
     gateway = new ExchangeGateway(vault, options.gatewayFactory);
   const trading = new Trading(
     store,
     market,
     vault,
     gateway,
-    options.liveAllowed === true,
+    options.liveAllowed === true && !options.autoSiteMode,
+    siteUniverse,
   );
   const auth = new Auth(
     store,
@@ -132,6 +139,7 @@ export function createApplication(options: Options) {
       apiPauses: market.status(),
       schedulerMode: options.schedulerMode || "external",
       formationCount: DEFAULT_SETTINGS.formationTypes.length,
+      siteUniverse: siteUniverse?.status() || null,
     });
   });
   app.put(
@@ -323,6 +331,7 @@ async function main() {
     liveAllowed: process.env.ENABLE_LIVE_TRADING === "true",
     schedulerMode: process.env.SCHEDULER_MODE || "external",
     weightBudget: Number(process.env.BINANCE_WEIGHT_BUDGET || 1000),
+    autoSiteMode: process.env.AUTO_H00K_TOP10 === "true",
   });
   const host = process.env.HOST || "127.0.0.1",
     port = Number(process.env.PORT || 3010);

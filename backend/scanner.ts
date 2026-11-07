@@ -3,6 +3,7 @@ import type { Store } from "./store";
 import type { MarketData } from "./market";
 import { detectFormations } from "./patterns";
 import { formationIsVisible, signalAllowsEntry } from "./formationState";
+import type { SiteUniverse } from "./siteUniverse";
 
 export class Scanner {
   running = false;
@@ -10,6 +11,7 @@ export class Scanner {
   constructor(
     private store: Store,
     private market: MarketData,
+    private siteUniverse?: SiteUniverse,
   ) {}
   private saveStatus(status: any) {
     const latest = this.store.get<any>("scanner", {});
@@ -50,9 +52,14 @@ export class Scanner {
     return { accepted: true };
   }
   private async run(settings: Settings, old: any) {
-    const signature = `analysis${FORMATION_ANALYSIS_VERSION}:interleaved:${settings.exchange}:${settings.timeframes.join(",")}:${settings.candleLimit}`;
+    if (this.siteUniverse && settings.exchange !== "binance") {
+      throw new Error("AUTO: лише Binance Futures");
+    }
+    const selected = this.siteUniverse ? await this.siteUniverse.current() : null;
+    const signature = `analysis${FORMATION_ANALYSIS_VERSION}:interleaved:${settings.exchange}:${settings.timeframes.join(",")}:${settings.candleLimit}:${selected?.join(",") || "all"}`;
     let cursor = old.signature === signature ? old.cursor || 0 : 0;
-    const markets = await this.market.getMarkets(settings.exchange);
+    const allMarkets = await this.market.getMarkets(settings.exchange);
+    const markets = selected ? allMarkets.filter(m => selected.includes(m.symbol)) : allMarkets;
     const tasks = markets.flatMap((m) =>
       settings.timeframes.map((timeframe) => ({ symbol: m.symbol, timeframe })),
     );
@@ -74,7 +81,8 @@ export class Scanner {
     this.saveStatus(status);
     const existing = this.store
       .get<Signal[]>("signals", [])
-      .filter((signal) => formationIsVisible(signal, settings));
+      .filter((signal) => formationIsVisible(signal, settings) &&
+        (!this.siteUniverse || this.siteUniverse.allows(signal.symbol)));
     const signals = new Map(existing.map((s) => [s.id, s]));
     const count = Math.min(settings.scanBatchSize, tasks.length);
     for (let index = 0; index < count; index++) {
@@ -125,7 +133,8 @@ export class Scanner {
         this.store.set(
           "signals",
           [...signals.values()]
-            .filter((signal) => formationIsVisible(signal, settings))
+            .filter((signal) => formationIsVisible(signal, settings) &&
+              (!this.siteUniverse || this.siteUniverse.allows(signal.symbol)))
             .slice(-20_000),
         );
       }
@@ -134,12 +143,14 @@ export class Scanner {
     this.store.set(
       "signals",
       [...signals.values()]
-        .filter((signal) => formationIsVisible(signal, settings))
+        .filter((signal) => formationIsVisible(signal, settings) &&
+          (!this.siteUniverse || this.siteUniverse.allows(signal.symbol)))
         .slice(-20_000),
     );
     if (!status.successful && status.failed && !status.error)
       status.error = status.errors[0]?.message || "Дані свічок не завантажилися";
-    const retained = [...signals.values()].filter((signal) => formationIsVisible(signal, settings));
+    const retained = [...signals.values()].filter((signal) => formationIsVisible(signal, settings) &&
+      (!this.siteUniverse || this.siteUniverse.allows(signal.symbol)));
     this.saveStatus({
       ...status,
       cursor,

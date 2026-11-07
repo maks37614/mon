@@ -16,6 +16,7 @@ import type { MarketData } from "./market";
 import type { Vault } from "./security";
 import { depthFill, liquidationPrice, liquidatable, validTiers, type PaperState } from "./paperModel";
 import { PaperFeed, type PriceTick } from "./paperFeed";
+import type { SiteUniverse } from "./siteUniverse";
 import {
   ExchangeGateway,
   definitiveRejection,
@@ -94,6 +95,7 @@ export class Trading {
     private vault: Vault,
     private gateway: ExchangeGateway,
     readonly liveAllowed: boolean,
+    private siteUniverse?: SiteUniverse,
   ) {}
   settings() {
     const saved = this.store.get<Partial<Settings>>("settings", {});
@@ -136,6 +138,9 @@ export class Trading {
         throw new Error(
           "Спочатку закрийте позиції та узгодьте очікуючі ордери",
         );
+      if (this.siteUniverse && (next.exchange !== "binance" || next.mode !== "paper")) {
+        throw new Error("AUTO: дозволено лише Binance Futures та тестові ордери на реальному ринку");
+      }
       if (next.mode === "live") {
         if (!this.liveAllowed)
           throw new Error(
@@ -171,7 +176,8 @@ export class Trading {
       wins = history.filter((t) => t.netPnl > 0).length;
     const now = Date.now();
     const formations = this.store.get<Signal[]>("signals", [])
-      .filter((signal) => formationIsVisible(signal, s, now));
+      .filter((signal) => formationIsVisible(signal, s, now) &&
+        (!this.siteUniverse || this.siteUniverse.allows(signal.symbol)));
     return {
       settings: s,
       entrySchedule: tradingScheduleState(s.tradingSchedule, now),
@@ -332,6 +338,10 @@ export class Trading {
     const s = this.settings(),
       b = this.book(s.mode),
       now = Date.now();
+    if (this.siteUniverse && (s.exchange !== "binance" || s.mode !== "paper" ||
+      signal.exchange !== "binance" || !this.siteUniverse.allows(signal.symbol))) {
+      throw new Error("AUTO: монета не входить у свіжий список 10 активних Binance із h00k.top");
+    }
     if (automatic && (!s.autoEntries || !tradingScheduleState(s.tradingSchedule, now).allowed))
       throw new Error("Автоматичні входи призупинено або зараз поза торговим розкладом");
     if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !Number.isInteger(signal.confidence) ||
