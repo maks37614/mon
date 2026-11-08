@@ -82,6 +82,8 @@ test("monitor uses one Binance websocket, filters inactive/non-USDT/COIN-M, and 
   }
   let socket!:FakeSocket;
   const m=new ImpulseMonitor(store,{
+    status:()=>({}),
+    weightStatus:()=>({used:100,observedAt:Date.now(),localBudget:1200,pausedUntil:null}),
     getMarkets:async(exchange:string)=>{
       assert.equal(exchange,"binance");
       marketsCalls++;
