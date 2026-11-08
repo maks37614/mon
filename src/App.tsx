@@ -46,7 +46,10 @@ type Snapshot = {
   apiPauses: Record<string, number>;
   impulseStatus?: {state:string; markets:number; tracked:number; queue:number; found:number; lastMessage:number|null; error:string|null;
   candidates?:number;checkedCandles?:number;rejected?:number;ratePaused?:number;lastRejection?:string|null;
-  binanceWeight?:{used:number|null;observedAt:number|null;localBudget:number;pausedUntil:number|null}|null;}|null;
+  binanceWeight?:{used:number|null;observedAt:number|null;localBudget:number;pausedUntil:number|null}|null;
+  klineStatus?:{state:string;activeStreams:number;warmStreams:number;
+    lastCandleAt:number|null;wsCandleEvents:number;bootstrapCalls:number;
+    bootstrapSuccess:number;bootstrapDeferred:number;lastError:string|null}|null;}|null;
   impulseEntryDiagnostic?: {at:number;symbol:string;ok:boolean;reason:string}|null;
   publicPaperApproximation?:boolean;
   siteUniverse?: { selected: string[]; fresh: boolean; lastSuccess: number | null; error: string | null } | null;
@@ -1079,13 +1082,25 @@ export default function App() {
             <div className={`notice ${data.impulseStatus.state==="live" ? "success" : "error"}`}>
               <strong>Binance WebSocket: {data.impulseStatus.state==="live" ? "підключено" : "перепідключення"}</strong>
               <p>Активних ф'ючерсів: {data.impulseStatus.markets}. Отримано тікери: {data.impulseStatus.tracked}. Підтверджені імпульси: {data.impulseStatus.found}.</p>
-              <p>Кандидатів: {data.impulseStatus.candidates ?? 0} · REST-перевірок: {data.impulseStatus.checkedCandles ?? 0} ·
-                Не пройшли умови: {data.impulseStatus.rejected ?? 0} · Пропущено через ліміт API: {data.impulseStatus.ratePaused ?? 0}.</p>
-              {data.impulseStatus.lastRejection && <p className="muted">Остання причина: {data.impulseStatus.lastRejection}</p>}
+              <p>Кандидатів: {data.impulseStatus.candidates ?? 0} · Перевірок свічок через WebSocket: {data.impulseStatus.checkedCandles ?? 0} ·
+                Не пройшли умови: {data.impulseStatus.rejected ?? 0}.</p>
+              {data.impulseStatus.klineStatus && (
+                <>
+                  <p>Свічки 1m WebSocket: {data.impulseStatus.klineStatus.state==="live"?"підключено":"перепідключення"} ·
+                    Відібраних потоків: {data.impulseStatus.klineStatus.activeStreams}/32 ·
+                    Із готовою історією 20 хв: {data.impulseStatus.klineStatus.warmStreams}.</p>
+                  <p>Початкових REST-завантажень історії: {data.impulseStatus.klineStatus.bootstrapCalls} ·
+                    Успішних: {data.impulseStatus.klineStatus.bootstrapSuccess} ·
+                    Відкладено через REST-ліміт / недоступність: {data.impulseStatus.klineStatus.bootstrapDeferred}.</p>
+                  {data.impulseStatus.klineStatus.lastError &&
+                    <p className="muted">Підключення свічок: {data.impulseStatus.klineStatus.lastError}</p>}
+                </>
+              )}
+              {data.impulseStatus.lastRejection && <p className="muted">Остання причина відхилення: {data.impulseStatus.lastRejection}</p>}
               {data.impulseStatus.binanceWeight?.used != null &&
                 <small>Вага REST запитів спільної IP: {data.impulseStatus.binanceWeight.used} із внутрішнього ліміту auto-mon {data.impulseStatus.binanceWeight.localBudget} на хвилину.</small>}
               {data.impulseStatus.error && <p>{data.impulseStatus.error}</p>}
-              <small>Поточні дані Binance. h00k.top не використовується для сканування.</small>
+              <small>Усі USDT-ф'ючерси через загальний WebSocket; свічки лише для кандидатів. h00k.top не використовується.</small>
             </div>
           )}
           {data.impulseStatus && (
