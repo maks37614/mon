@@ -119,6 +119,7 @@ test("monitor uses ONE all-market stream plus bounded kline stream, with only op
     quote(clock,101.1),quote(clock,102,{s:"OTHUSDT",q:"0"}),
   ])});
   assert.equal(m.status().queue,1);
+  (m as any).klines.flushControls();
   assert.ok(kline.sent.some(req=>req.method==="SUBSCRIBE" && req.params[0]==="coinusdt@kline_1m"));
   await new Promise(resolve=>setImmediate(resolve));
   const current=makeCandles().at(-1)!;
