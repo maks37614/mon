@@ -299,10 +299,12 @@ export class SelectiveKlineStreams {
     const pauses=this.market.status();
     const weight=this.market.weightStatus();
     const used=weight?.used;
+    const ceiling=Number.isFinite(weight?.localBudget)
+      ? Math.min(REST_USED_CEILING,weight.localBudget-150)
+      : REST_USED_CEILING;
     if((pauses.binance||0)>this.now() ||
        (used != null && weight.observedAt != null &&
-        this.now()-weight.observedAt<60_000 &&
-        used>=Math.min(REST_USED_CEILING,weight.localBudget-150))){
+        this.now()-weight.observedAt<60_000 && used>=ceiling)){
       // Delayed, not silently dropped: keep collecting real WS candles.
       if(this.now()-this.lastBootstrapAt>=REST_GAP_MS) {
         this.bootstrapDeferred++;
