@@ -82,6 +82,30 @@ export function confirmImpulse(
   };
 }
 
+/** Best-effort diagnostics, never used to admit a trading signal. */
+export function explainImpulseRejection(candidate:ImpulseCandidate,candles:Candle[],now:number):string {
+  if(candles.length<31) return "Недостатньо 1m свічок Binance";
+  if(now-candidate.at>15_000)return "Кандидат застарів до підтвердження";
+  const current=candles.at(-1)!;
+  if(!Number.isFinite(current.time) || now-current.time<10_000 || now-current.time>65_000)
+    return "Поточна 1m свічка надто рання або застаріла";
+  const previous=candles.slice(-21,-1);
+  if(previous.length!==20)return "Недостатньо історії 20m";
+  const changePct=(current.close/current.open-1)*100;
+  if(!Number.isFinite(changePct) || Math.abs(changePct)<CANDLE_MOVE_PCT ||
+      (changePct>0?"LONG":"SHORT")!==candidate.direction)
+    return "Рух поточної 1m свічки <0,8% або інший напрямок";
+  const volume=previous.reduce((sum,c)=>sum+c.volume,0)/20;
+  const fraction=Math.max(0.25,Math.min(1,(now-current.time)/60_000));
+  if(!(volume>0) || current.volume/(volume*fraction)<2.5)
+    return "Обсяг не перевищив нормальний темп у 2,5 раза";
+  const high=Math.max(...previous.map(c=>c.high));
+  const low=Math.min(...previous.map(c=>c.low));
+  if(candidate.direction==="LONG"?current.close<=high:current.close>=low)
+    return "Немає пробою діапазону попередніх 20 хвилин";
+  return "Не пройдено одну з перевірок валідності ринкових даних";
+}
+
 type Socket = Pick<WebSocket,"addEventListener"|"close"|"readyState">;
 export class ImpulseMonitor {
   private socket:Socket | null=null;
@@ -104,6 +128,11 @@ export class ImpulseMonitor {
   private state:"stopped"|"connecting"|"live"|"reconnecting"="stopped";
   private lastError:string | null=null;
   private found=0;
+  private candidates=0;
+  private checkedCandles=0;
+  private rejected=0;
+  private ratePaused=0;
+  private lastRejection:string | null=null;
   private logAt=0;
   constructor(
     private store:Store,
@@ -120,6 +149,10 @@ export class ImpulseMonitor {
       transport:"WebSocket !ticker@arr + Binance 1m REST confirmation",
       markets:this.markets.size,tracked:this.priceHistory.size,
       queue:this.queue.length,found:this.found,lastMessage:this.lastMessage||null,
+      candidates:this.candidates,checkedCandles:this.checkedCandles,
+      rejected:this.rejected,ratePaused:this.ratePaused,
+      lastRejection:this.lastRejection,
+      binanceWeight:this.market.weightStatus?.() || null,
       error:this.lastError};
   }
   async start() {
@@ -215,7 +248,11 @@ export class ImpulseMonitor {
           if(trigger && !this.queued.has(symbol) &&
              !this.checked.has(symbol+":"+Math.floor(ticker.E/60_000)) &&
              this.queue.length<MAX_QUEUE) {
-            this.queue.push(trigger);this.queued.add(symbol);
+            this.queue.push(trigger);
+            // Confirm strongest movements first while REST confirmation is paced.
+            this.queue.sort((a,b)=>Math.abs(b.changePct)-Math.abs(a.changePct));
+            this.queued.add(symbol);
+            this.candidates++;
           }
           seen=true;
         }
@@ -234,6 +271,9 @@ export class ImpulseMonitor {
     if(!this.keepRunning || this.state!=="live" || !this.markets.size ||
        this.verifying || this.now()-this.lastVerify<VERIFY_INTERVAL_MS ||
        !this.queue.length)return;
+    // confirmImpulse requires at least ten seconds of the current 1m candle.
+    // Skip unproductive REST calls before that point.
+    if(this.now()%60_000<10_000)return;
     const candidate=this.queue.shift()!;
     this.queued.delete(candidate.symbol);
     if(this.now()-candidate.at>12_000)return;
@@ -243,11 +283,24 @@ export class ImpulseMonitor {
     if(this.checked.size>2_000)
       for(const [key,at] of this.checked)if(this.now()-at>120_000)this.checked.delete(key);
     this.lastVerify=this.now();
+    const blockedUntil=this.market.status().binance||0;
+    if(blockedUntil>this.now()) {
+      this.ratePaused++;
+      this.lastRejection="REST-підтвердження відкладено: захисний ліміт IP Binance до "+
+        new Date(blockedUntil).toISOString();
+      return;
+    }
     this.verifying=true;
     try{
-      const candles=await this.market.getCandles("binance",candidate.symbol,"1m",50,false);
+      // 31 candles suffice for a 20m historical baseline + current 1m bar.
+      const candles=await this.market.getCandles("binance",candidate.symbol,"1m",31,false);
+      this.checkedCandles++;
       const signal=confirmImpulse(candidate,candles,this.now());
-      if(!signal)return;
+      if(!signal) {
+        this.rejected++;
+        this.lastRejection=explainImpulseRejection(candidate,candles,this.now());
+        return;
+      }
       const s=this.store.get<any>("settings",{});
       signal.stopLoss=signal.entryPrice*(1-(signal.direction==="LONG"?1:-1)*(s.stopLossPercent||0.25)/100);
       signal.takeProfit=signal.entryPrice*(1+(signal.direction==="LONG"?1:-1)*(s.takeProfitPercent||0.45)/100);
@@ -258,8 +311,11 @@ export class ImpulseMonitor {
       this.found++;
       this.store.log("INFO",candidate.symbol+" "+signal.direction+" імпульс: "+signal.description);
     }catch(e:any){
-      this.lastError=String(e.message||e).slice(0,150);
-      this.log("Помилка підтвердження імпульсу "+candidate.symbol+": "+this.lastError);
+      const message=String(e.message||e).slice(0,150);
+      if(/API binance: пауза|ліміт запитів|HTTP 429|HTTP 418/i.test(message))this.ratePaused++;
+      this.lastRejection=message;
+      this.lastError=message;
+      this.log("Помилка підтвердження імпульсу "+candidate.symbol+": "+message);
     }finally{this.verifying=false;}
   }
 }

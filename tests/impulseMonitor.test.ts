@@ -91,7 +91,7 @@ test("monitor uses one Binance websocket, filters inactive/non-USDT/COIN-M, and 
       assert.equal(exchange,"binance");
       assert.equal(symbol,"COINUSDT");
       assert.equal(tf,"1m");
-      assert.equal(limit,50);
+      assert.equal(limit,31);
       candlesCalls++;
       return makeCandles();
     },

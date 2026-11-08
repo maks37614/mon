@@ -13,6 +13,7 @@ export class MarketData {
   private pacing = new Mutex();
   private nextRequest = 0;
   private blocked = new Map<Exchange, number>();
+  private lastWeight: {used:number;at:number} | null = null;
   private markets = new Map<Exchange, { expires: number; data: Market[] }>();
   private prices = new Map<
     Exchange,
@@ -27,6 +28,14 @@ export class MarketData {
   ) {}
   status() {
     return Object.fromEntries(this.blocked);
+  }
+  weightStatus() {
+    return {
+      used: this.lastWeight?.used ?? null,
+      observedAt: this.lastWeight?.at ?? null,
+      localBudget: this.weightBudget,
+      pausedUntil: this.blocked.get("binance") || null,
+    };
   }
   private async request(
     exchange: Exchange,
@@ -56,15 +65,19 @@ export class MarketData {
       headers: { Accept: "application/json" },
       redirect: "error",
     });
-    if (
-      exchange === "binance" &&
-      Number(response.headers.get("x-mbx-used-weight-1m") || 0) >=
-        this.weightBudget
-    )
-      this.blocked.set(
-        exchange,
-        Math.ceil(Date.now() / 60_000) * 60_000 + 1000,
-      );
+    if (exchange === "binance") {
+      const used = Number(response.headers.get("x-mbx-used-weight-1m"));
+      if (Number.isFinite(used) && used > 0) {
+        this.lastWeight = {used, at:Date.now()};
+        // Binance counts all clients sharing the public IP. The local threshold
+        // is deliberately below the exchange limit and applies only to auto-mon.
+        if (used >= this.weightBudget)
+          this.blocked.set(
+            exchange,
+            Math.ceil(Date.now() / 60_000) * 60_000 + 1000,
+          );
+      }
+    }
     if ([418, 429].includes(response.status)) {
       const retry = Number(response.headers.get("retry-after")) || 60;
       this.blocked.set(

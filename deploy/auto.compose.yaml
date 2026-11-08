@@ -20,7 +20,7 @@ services:
       ENABLE_LIVE_TRADING: "false"
       AUTO_H00K_TOP10: "false"
       AUTO_IMPULSE_ALL: "true"
-      BINANCE_WEIGHT_BUDGET: "800"
+      BINANCE_WEIGHT_BUDGET: "1200"
     ports:
       - "127.0.0.1:3027:3010"
     volumes:
