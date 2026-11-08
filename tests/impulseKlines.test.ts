@@ -138,3 +138,46 @@ test("disconnect clears kline baseline and fails closed, never retains stale can
   assert.equal(stream.isFresh(),false);
   assert.equal(stream.status().warmStreams,0);
 });
+
+
+test("low-weight candidate bootstrap is allowed at shared-IP weight 850 and globally paced every 15s",async t=>{
+  let clock=BASE+30_000,used=850,calls=0;
+  const market:any={
+    status:()=>({}),
+    weightStatus:()=>({used,observedAt:clock,localBudget:1200}),
+    getCandles:async(_exchange:string,symbol:string,tf:string,limit:number)=>{
+      calls++;
+      assert.equal(tf,"1m");assert.equal(limit,31);
+      return Array.from({length:31},(_,i)=>({
+        time:Math.floor(clock/60_000)*60_000-(30-i)*60_000,
+        open:100,high:101,low:99,close:100,volume:100,
+      }));
+    },
+  };
+  const {stream,socket}=fixture(market,()=>clock);
+  t.after(()=>stream.stop());
+  assert.equal(stream.watch("BTCUSDT"),true);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls,1);
+  assert.equal(stream.status().bootstrapSuccess,1);
+
+  // Another candidate cannot bootstrap immediately regardless of low IP weight.
+  assert.equal(stream.watch("ETHUSDT"),true);
+  await (stream as any).bootstrapNext();
+  assert.equal(calls,1);
+  clock+=14_900;
+  await (stream as any).bootstrapNext();
+  assert.equal(calls,1);
+  clock+=200;
+  await (stream as any).bootstrapNext();
+  assert.equal(calls,2);
+
+  // A third candidate is deferred if the shared-IP weight crosses 1000.
+  used=1150;
+  assert.equal(stream.watch("SOLUSDT"),true);
+  clock+=15_000;
+  await (stream as any).bootstrapNext();
+  assert.equal(calls,2);
+  assert.ok(stream.status().bootstrapDeferred>0);
+  assert.equal(socket.sent.length,0,"socket controls remain batched, no one-frame-per-candidate spam");
+});

@@ -12,9 +12,12 @@ import type { MarketData } from "./market";
 export const KLINE_STREAM_URL = "wss://fstream.binance.com/market/stream";
 export const MAX_KLINE_STREAMS = 32;
 const HISTORY_MINUTES = 21;
-const REST_GAP_MS = 30_000;
+const REST_GAP_MS = 15_000;
 const REST_RETRY_MS = 5 * 60_000;
-const REST_USED_CEILING = 600;
+// 31 recent 1m klines cost only ONE IP-weight unit (Binance docs).
+// Permit up to four one-shot seeds/minute only with headroom under
+// auto-mon local 1200 budget. All other bots on the IP keep priority.
+const REST_USED_CEILING = 1_000;
 const WATCH_TTL_MS = 25 * 60_000;
 const MARKET_CANDLE_MS = 60_000;
 const WS_FRESH_MS = 10_000;
@@ -298,7 +301,8 @@ export class SelectiveKlineStreams {
     const used=weight?.used;
     if((pauses.binance||0)>this.now() ||
        (used != null && weight.observedAt != null &&
-        this.now()-weight.observedAt<60_000 && used>=REST_USED_CEILING)){
+        this.now()-weight.observedAt<60_000 &&
+        used>=Math.min(REST_USED_CEILING,weight.localBudget-150))){
       // Delayed, not silently dropped: keep collecting real WS candles.
       if(this.now()-this.lastBootstrapAt>=REST_GAP_MS) {
         this.bootstrapDeferred++;
