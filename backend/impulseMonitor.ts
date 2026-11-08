@@ -1,11 +1,13 @@
 /** Low-load real-time impulse discovery across ALL active Binance USDT perpetual markets.
- * The all-market ticker websocket is a *candidate filter*; real Binance 1m candles
- * are checked for breakout and live volume BEFORE a signal is published.
+ * The all-market ticker websocket is a *candidate filter*. A bounded set of
+ * Binance 1m kline WebSocket subscriptions confirms volume and breakouts; a
+ * heavily rate-limited REST history seed is optional and used once per symbol.
  * Never sends orders or touches h00k.top.
  */
 import { createHash } from "node:crypto";
 import type { Store } from "./store";
 import type { MarketData } from "./market";
+import { SelectiveKlineStreams, type KlineSocketFactory } from "./impulseKlines";
 import { FORMATION_ANALYSIS_VERSION, type Candle, type Signal } from "./config";
 
 export const IMPULSE_STREAM_URL = "wss://fstream.binance.com/market/ws/!ticker@arr";
@@ -15,8 +17,8 @@ const TICKER_MOVE_PCT = 0.55;
 const CANDLE_MOVE_PCT = 0.8;
 const MIN_QUOTE_24H = 0;
 const MAX_QUEUE = 30;
+const MAX_CANDIDATE_AGE = 15_000;
 const MAX_HISTORY = 42;
-const VERIFY_INTERVAL_MS = 1_800;
 const MONITOR_TIMEOUT_MS = 20_000;
 
 export type ImpulseCandidate = {symbol:string; direction:"LONG"|"SHORT"; changePct:number; price:number; at:number};
@@ -41,7 +43,7 @@ export function impulseTickerCandidate(
 export function confirmImpulse(
   candidate: ImpulseCandidate, candles:Candle[], now:number
 ): Signal | null {
-  if (candles.length < 31 || now-candidate.at>15_000) return null;
+  if (candles.length < 21 || now-candidate.at>15_000) return null;
   const current=candles.at(-1)!;
   const previous=candles.slice(-21,-1);
   if(previous.length!==20 || previous.some((c,i)=>c.volume<0 ||
@@ -84,7 +86,7 @@ export function confirmImpulse(
 
 /** Best-effort diagnostics, never used to admit a trading signal. */
 export function explainImpulseRejection(candidate:ImpulseCandidate,candles:Candle[],now:number):string {
-  if(candles.length<31) return "Недостатньо 1m свічок Binance";
+  if(candles.length<21) return "Недостатньо 1m свічок Binance";
   if(now-candidate.at>15_000)return "Кандидат застарів до підтвердження";
   const current=candles.at(-1)!;
   if(!Number.isFinite(current.time) || now-current.time<10_000 || now-current.time>65_000)
@@ -108,103 +110,134 @@ export function explainImpulseRejection(candidate:ImpulseCandidate,candles:Candl
 
 type Socket = Pick<WebSocket,"addEventListener"|"close"|"readyState">;
 export class ImpulseMonitor {
-  private socket:Socket | null=null;
+  private socket:Socket|null=null;
+  private klines:SelectiveKlineStreams;
   private keepRunning=false;
-  private reconnectTimer:ReturnType<typeof setTimeout> | null=null;
-  private watchdog:ReturnType<typeof setInterval> | null=null;
-  private verifyTimer:ReturnType<typeof setInterval> | null=null;
-  private marketRefresh:ReturnType<typeof setInterval> | null=null;
+  private reconnectTimer:ReturnType<typeof setTimeout>|null=null;
+  private watchdog:ReturnType<typeof setInterval>|null=null;
+  private marketRefresh:ReturnType<typeof setInterval>|null=null;
   private markets=new Set<string>();
   private priceHistory=new Map<string,TickerPoint[]>();
-  private checked=new Map<string,number>();
   private lastTicker=new Map<string,number>();
-  private queue:ImpulseCandidate[]=[];
-  private queued=new Set<string>();
-  private verifying=false;
-  private lastVerify=0;
+  private pending=new Map<string,ImpulseCandidate>();
+  private checked=new Map<string,number>();
+  private lastRejectedAt=new Map<string,number>();
   private lastMessage=0;
   private connectedAt=0;
   private reconnectAttempts=0;
   private state:"stopped"|"connecting"|"live"|"reconnecting"="stopped";
-  private lastError:string | null=null;
+  private lastError:string|null=null;
   private found=0;
   private candidates=0;
   private checkedCandles=0;
   private rejected=0;
-  private ratePaused=0;
-  private lastRejection:string | null=null;
+  private lastRejection:string|null=null;
   private logAt=0;
+
   constructor(
     private store:Store,
     private market:MarketData,
     private socketFactory:(url:string)=>Socket = url=>new WebSocket(url),
     private now:()=>number = Date.now,
-  ) {}
+    klineFactory?:KlineSocketFactory,
+  ){
+    this.klines=new SelectiveKlineStreams(
+      market,(symbol,candles)=>this.onCandles(symbol,candles),
+      klineFactory,now,
+    );
+  }
+
+  /** Both the all-market ticker and the kline stream must be fresh. */
   isFresh():boolean {
-    return this.keepRunning && this.state==="live" && this.lastMessage>0 &&
+    return this.keepRunning && this.isTickerFresh() && this.klines.isFresh();
+  }
+  private isTickerFresh():boolean {
+    return this.state==="live" && this.lastMessage>0 &&
       this.now()-this.lastMessage<10_000;
   }
-  status() {
-    return {state:this.state,source:"Binance USDT perpetual live",
-      transport:"WebSocket !ticker@arr + Binance 1m REST confirmation",
+  status(){
+    const k=this.klines.status();
+    return {
+      state:this.state,source:"Binance USDT perpetual live",
+      transport:"WebSocket !ticker@arr + candidate-only @kline_1m; optional paced REST history seed",
       markets:this.markets.size,tracked:this.priceHistory.size,
-      queue:this.queue.length,found:this.found,lastMessage:this.lastMessage||null,
+      queue:this.pending.size,found:this.found,lastMessage:this.lastMessage||null,
       candidates:this.candidates,checkedCandles:this.checkedCandles,
-      rejected:this.rejected,ratePaused:this.ratePaused,
+      rejected:this.rejected,ratePaused:k.bootstrapDeferred,
       lastRejection:this.lastRejection,
-      binanceWeight:this.market.weightStatus?.() || null,
-      error:this.lastError};
+      klineStatus:k,
+      binanceWeight:this.market.weightStatus?.()||null,
+      error:this.lastError||k.lastError,
+    };
   }
-  async start() {
+  async start(){
     if(this.keepRunning)return;
     this.keepRunning=true;
     this.state="connecting";
     this.store.set("signals",[]);
-    try {await this.refreshMarkets();}
-    catch(e:any){this.lastError=String(e.message||e);this.log("Не вдалося отримати Binance Futures markets: "+this.lastError);}
+    try{await this.refreshMarkets();}
+    catch(e:any){
+      this.lastError=String(e.message||e);
+      this.log("Не вдалося отримати Binance Futures markets: "+this.lastError);
+    }
     if(!this.keepRunning)return;
+    this.klines.start();
     this.connect();
     this.watchdog=setInterval(()=>{
-      if((this.state==="live" && this.now()-this.lastMessage>MONITOR_TIMEOUT_MS) ||
-         (this.state==="connecting" && this.now()-this.connectedAt>MONITOR_TIMEOUT_MS)) {
-        this.log("Binance WebSocket не отримує оновлень; перепідключення");
-        this.socket?.close();
+      const t=this.now();
+      if((this.state==="live" && t-this.lastMessage>MONITOR_TIMEOUT_MS) ||
+         (this.state==="connecting" && t-this.connectedAt>MONITOR_TIMEOUT_MS)){
+        this.log("Binance ticker WebSocket замовк, перепідключення");
         this.reconnect();
       }
+      this.prune(t);
     },5_000);
-    this.verifyTimer=setInterval(()=>void this.verifyNext(),500);
     this.marketRefresh=setInterval(()=>void this.refreshMarkets().catch(e=>{
       this.lastError=String(e.message||e);
     }),60*60_000);
-    this.watchdog.unref?.(); this.verifyTimer.unref?.(); this.marketRefresh.unref?.();
+    this.watchdog.unref?.();this.marketRefresh.unref?.();
   }
-  stop() {
+  stop(){
     this.keepRunning=false;this.state="stopped";
     if(this.reconnectTimer)clearTimeout(this.reconnectTimer);
     if(this.watchdog)clearInterval(this.watchdog);
-    if(this.verifyTimer)clearInterval(this.verifyTimer);
     if(this.marketRefresh)clearInterval(this.marketRefresh);
-    this.socket?.close();this.socket=null;
-    this.queue=[];this.queued.clear();this.priceHistory.clear();
+    const socket=this.socket;this.socket=null;
+    socket?.close();
+    this.klines.stop();
+    this.pending.clear();this.priceHistory.clear();this.lastTicker.clear();
   }
   private log(message:string){
     if(this.now()-this.logAt<60_000)return;
     this.logAt=this.now();
-    this.store.log("WARN",message.slice(0,160));
+    this.store.log("WARN",message.slice(0,180));
   }
-  private async refreshMarkets() {
+  private prune(time:number){
+    for(const [sym,c] of this.pending)
+      if(time-c.at>MAX_CANDIDATE_AGE)this.pending.delete(sym);
+    for(const [key,at] of this.checked)
+      if(time-at>120_000)this.checked.delete(key);
+    for(const [key,at] of this.lastRejectedAt)
+      if(time-at>120_000)this.lastRejectedAt.delete(key);
+  }
+  private async refreshMarkets(){
     const markets=await this.market.getMarkets("binance");
     const next=new Set(markets.map(m=>m.symbol).filter(s=>SYMBOL.test(s)));
-    if(next.size===0)throw new Error("Binance Futures: no active USDT perpetual contracts");
+    if(!next.size)throw new Error("Binance Futures: no active USDT perpetual contracts");
     this.markets=next;
-    for(const symbol of this.priceHistory.keys())if(!next.has(symbol))this.priceHistory.delete(symbol);
+    for(const symbol of this.priceHistory.keys())
+      if(!next.has(symbol))this.priceHistory.delete(symbol);
+    for(const symbol of this.pending.keys())
+      if(!next.has(symbol))this.pending.delete(symbol);
   }
   private reconnect(){
     if(!this.keepRunning || this.reconnectTimer)return;
     this.state="reconnecting";
-    this.queue=[];this.queued.clear();this.priceHistory.clear();
-    this.socket?.close();this.socket=null;
-    const delay=Math.min(60_000,1_000*2**Math.min(this.reconnectAttempts++,6));
+    this.pending.clear();this.priceHistory.clear();this.lastTicker.clear();
+    this.lastMessage=0;
+    const previous=this.socket;this.socket=null;
+    previous?.close();
+    const delay=Math.min(60_000,1000*2**Math.min(this.reconnectAttempts++,6));
     this.reconnectTimer=setTimeout(()=>{
       this.reconnectTimer=null;
       if(this.keepRunning)this.connect();
@@ -213,109 +246,108 @@ export class ImpulseMonitor {
   }
   private connect(){
     if(!this.keepRunning)return;
-    this.state="connecting";
-    this.connectedAt=this.now();
-    let sock:Socket;
-    try{sock=this.socketFactory(IMPULSE_STREAM_URL);}
+    this.state="connecting";this.connectedAt=this.now();
+    let socket:Socket;
+    try{socket=this.socketFactory(IMPULSE_STREAM_URL);}
     catch(e:any){this.lastError=String(e.message||e);this.reconnect();return;}
-    this.socket=sock;
-    sock.addEventListener("open",()=>{
-      if(this.socket===sock){this.state="connecting";this.lastError=null;}
+    this.socket=socket;
+    socket.addEventListener("open",()=>{
+      if(this.socket===socket){this.state="connecting";this.lastError=null;}
     });
-    sock.addEventListener("message",(event:any)=>{
-      if(!this.keepRunning || this.socket!==sock)return;
+    socket.addEventListener("message",(event:any)=>{
+      if(!this.keepRunning || this.socket!==socket)return;
       try{
         const rows=JSON.parse(String(event.data));
         const payload=Array.isArray(rows)?rows:rows?.data;
         if(!Array.isArray(payload))return;
-        const now=this.now();
+        const time=this.now();
         let seen=false;
-        for(const ticker of payload) {
+        for(const ticker of payload){
           const symbol=ticker?.s;
           if(!this.markets.has(symbol) || ticker?.st===2 ||
             (ticker?.st!=null && ticker.st!==1) ||
-            !Number.isFinite(ticker?.E) || Math.abs(now-ticker.E)>10_000) continue;
+            !Number.isFinite(ticker?.E) || Math.abs(time-ticker.E)>10_000)continue;
           const price=Number(ticker.c);
-          if(!Number.isFinite(price) || price<=0)continue;
+          if(!Number.isFinite(price)||price<=0)continue;
           if((this.lastTicker.get(symbol)||0)>=ticker.E)continue;
           this.lastTicker.set(symbol,ticker.E);
-          const h=this.priceHistory.get(symbol)||[];
-          while(h.length && h[0].at<ticker.E-LOOKBACK_MS)h.shift();
-          const trigger=impulseTickerCandidate(ticker,h,true,now);
-          h.push({at:ticker.E,price});
-          while(h.length>MAX_HISTORY)h.shift();
-          this.priceHistory.set(symbol,h);
-          if(trigger && !this.queued.has(symbol) &&
-             !this.checked.has(symbol+":"+Math.floor(ticker.E/60_000)) &&
-             this.queue.length<MAX_QUEUE) {
-            this.queue.push(trigger);
-            // Confirm strongest movements first while REST confirmation is paced.
-            this.queue.sort((a,b)=>Math.abs(b.changePct)-Math.abs(a.changePct));
-            this.queued.add(symbol);
-            this.candidates++;
+          const history=this.priceHistory.get(symbol)||[];
+          while(history.length && history[0].at<ticker.E-LOOKBACK_MS)
+            history.shift();
+          const candidate=impulseTickerCandidate(ticker,history,true,time);
+          history.push({at:ticker.E,price});
+          while(history.length>MAX_HISTORY)history.shift();
+          this.priceHistory.set(symbol,history);
+          if(candidate){
+            const key=symbol+":"+Math.floor(candidate.at/60_000)+":"+candidate.direction;
+            if(!this.checked.has(key)){
+              const existing=this.pending.get(symbol);
+              if(existing){
+                // Preserve the strongest candidate but keep event time fresh.
+                this.pending.set(symbol,{
+                  ...candidate,
+                  changePct:Math.abs(candidate.changePct)>Math.abs(existing.changePct)?
+                    candidate.changePct:existing.changePct,
+                });
+              }else if(this.pending.size<MAX_QUEUE && this.klines.watch(symbol)){
+                this.pending.set(symbol,candidate);
+                this.candidates++;
+              }
+            }
           }
           seen=true;
         }
         if(seen){
-          this.lastMessage=now;
+          this.lastMessage=time;
           this.reconnectAttempts=0;
           this.state="live";
           this.lastError=null;
+          this.prune(time);
         }
-      }catch{/* Invalid frames are not trade signals. */}
+      }catch{/* Bad ticker payloads are never signal events. */}
     });
-    sock.addEventListener("error",()=>{if(this.socket===sock)this.reconnect();});
-    sock.addEventListener("close",()=>{if(this.socket===sock)this.reconnect();});
+    socket.addEventListener("error",()=>{if(this.socket===socket)this.reconnect();});
+    socket.addEventListener("close",()=>{if(this.socket===socket)this.reconnect();});
   }
-  private async verifyNext(){
-    if(!this.keepRunning || this.state!=="live" || !this.markets.size ||
-       this.verifying || this.now()-this.lastVerify<VERIFY_INTERVAL_MS ||
-       !this.queue.length)return;
-    // confirmImpulse requires at least ten seconds of the current 1m candle.
-    // Skip unproductive REST calls before that point.
-    if(this.now()%60_000<10_000)return;
-    const candidate=this.queue.shift()!;
-    this.queued.delete(candidate.symbol);
-    if(this.now()-candidate.at>12_000)return;
-    const bucket=candidate.symbol+":"+Math.floor(candidate.at/60_000);
-    if(this.checked.has(bucket))return;
-    this.checked.set(bucket,this.now());
-    if(this.checked.size>2_000)
-      for(const [key,at] of this.checked)if(this.now()-at>120_000)this.checked.delete(key);
-    this.lastVerify=this.now();
-    const blockedUntil=this.market.status().binance||0;
-    if(blockedUntil>this.now()) {
-      this.ratePaused++;
-      this.lastRejection="REST-підтвердження відкладено: захисний ліміт IP Binance до "+
-        new Date(blockedUntil).toISOString();
+
+  /** Only a *real* kline frame (or recent WS bar + historical seed) can confirm. */
+  private onCandles(symbol:string,candles:Candle[]){
+    if(!this.keepRunning || !this.isTickerFresh())return;
+    const candidate=this.pending.get(symbol);
+    if(!candidate)return;
+    const time=this.now();
+    if(time-candidate.at>MAX_CANDIDATE_AGE){
+      this.pending.delete(symbol);return;
+    }
+    if(!this.klines.isFresh())return;
+    if(time%60_000<10_000 || candles.length<21)return;
+    const key=symbol+":"+Math.floor(candidate.at/60_000)+":"+candidate.direction;
+    if(this.checked.has(key))return;
+    this.checkedCandles++;
+    const signal=confirmImpulse(candidate,candles,time);
+    if(!signal){
+      // Do not count the same 250ms candle 4 times per second as 4 rejects.
+      const last=this.lastRejectedAt.get(key)||0;
+      if(time-last>=5_000){
+        this.lastRejectedAt.set(key,time);
+        this.rejected++;
+        this.lastRejection=explainImpulseRejection(candidate,candles,time);
+      }
       return;
     }
-    this.verifying=true;
-    try{
-      // 31 candles suffice for a 20m historical baseline + current 1m bar.
-      const candles=await this.market.getCandles("binance",candidate.symbol,"1m",31,false);
-      this.checkedCandles++;
-      const signal=confirmImpulse(candidate,candles,this.now());
-      if(!signal) {
-        this.rejected++;
-        this.lastRejection=explainImpulseRejection(candidate,candles,this.now());
-        return;
-      }
-      const s=this.store.get<any>("settings",{});
-      signal.stopLoss=signal.entryPrice*(1-(signal.direction==="LONG"?1:-1)*(s.stopLossPercent||0.25)/100);
-      signal.takeProfit=signal.entryPrice*(1+(signal.direction==="LONG"?1:-1)*(s.takeProfitPercent||0.45)/100);
-      const existing=this.store.get<Signal[]>("signals",[]);
-      const next=[signal,...existing.filter(item=>item.id!==signal.id &&
-        this.now()-item.candleAt<=180_000 && item.formation==="Impulse Breakout")].slice(0,100);
-      this.store.set("signals",next);
-      this.found++;
-      this.store.log("INFO",candidate.symbol+" "+signal.direction+" імпульс: "+signal.description);
-    }catch(e:any){
-      const message=String(e.message||e).slice(0,150);
-      if(/API binance: пауза|ліміт запитів|HTTP 429|HTTP 418/i.test(message))this.ratePaused++;
-      this.lastRejection=message;
-      this.lastError=message;
-      this.log("Помилка підтвердження імпульсу "+candidate.symbol+": "+message);
-    }finally{this.verifying=false;}
+    this.checked.set(key,time);
+    this.pending.delete(symbol);
+    const settings=this.store.get<any>("settings",{});
+    signal.stopLoss=signal.entryPrice*(1-
+      (signal.direction==="LONG"?1:-1)*(settings.stopLossPercent||0.25)/100);
+    signal.takeProfit=signal.entryPrice*(1+
+      (signal.direction==="LONG"?1:-1)*(settings.takeProfitPercent||0.45)/100);
+    const old=this.store.get<Signal[]>("signals",[]);
+    this.store.set("signals",[
+      signal,...old.filter(item=>item.id!==signal.id &&
+        time-item.candleAt<=180_000 && item.formation==="Impulse Breakout"),
+    ].slice(0,100));
+    this.found++;
+    this.store.log("INFO",symbol+" "+signal.direction+" імпульс (1m WS): "+signal.description);
   }
 }
