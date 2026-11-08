@@ -210,6 +210,8 @@ test("AUTO paper opens a real-market-priced virtual position WITHOUT Binance acc
   phase="exit";
   const book=store.get<any>("book:paper",{});
   await (trader as any).monitorPaper(book,book.positions[0]);
+  // The normal Trading.monitor() loop persists the completed book after processing.
+  store.set("book:paper",book);
   const closed=trader.snapshot();
   assert.equal(closed.positions.length,0);
   assert.equal(closed.history.length,1);
