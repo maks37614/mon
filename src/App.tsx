@@ -45,6 +45,8 @@ type Snapshot = {
   schedulerMode: string;
   apiPauses: Record<string, number>;
   impulseStatus?: {state:string; markets:number; tracked:number; queue:number; found:number; lastMessage:number|null; error:string|null}|null;
+  impulseEntryDiagnostic?: {at:number;symbol:string;ok:boolean;reason:string}|null;
+  publicPaperApproximation?:boolean;
   siteUniverse?: { selected: string[]; fresh: boolean; lastSuccess: number | null; error: string | null } | null;
 };
 type ChartSelection = HookChartProps & { id: string; historical: boolean };
@@ -407,7 +409,7 @@ function AutoSettingsPanel({data,run}: {
           </label>)}
         </div>
         <button className="primary" type="submit">Зберегти налаштування</button>
-        <p className="muted">Автовходи за замовчуванням вимкнені. Перед увімкненням перевірте сигнали. Для точної моделі маржі Binance можуть знадобитися API-ключі лише на читання.</p>
+        <p className="muted">Автовходи за замовчуванням вимкнені. Без Binance API-ключів використовується спрощена публічна 1x paper-модель: реальні котирування та стакан, орієнтовна комісія, ліквідація не моделюється. Для повної моделі ризику потрібні ключі лише на читання.</p>
       </form>
       <details className="panel">
         <summary>Додатково: Binance API для моделі комісій і маржі</summary>
@@ -1077,6 +1079,16 @@ export default function App() {
               <p>Активних ф'ючерсів: {data.impulseStatus.markets}. Отримано тікери: {data.impulseStatus.tracked}. Підтверджені імпульси: {data.impulseStatus.found}.</p>
               {data.impulseStatus.error && <p>{data.impulseStatus.error}</p>}
               <small>Поточні дані Binance. h00k.top не використовується для сканування.</small>
+            </div>
+          )}
+          {data.impulseStatus && (
+            <div className={`notice ${data.impulseEntryDiagnostic?.ok===false ? "error":""}`}>
+              <strong>Стан автоматичних тестових входів</strong>
+              <p>{data.impulseEntryDiagnostic
+                ? `${data.impulseEntryDiagnostic.symbol}: ${data.impulseEntryDiagnostic.ok ? "відкрито" : "відхилено"} — ${data.impulseEntryDiagnostic.reason}`
+                : "Спроб входу поки не було. Нові сигнали перевіряються тільки при увімкнених автовходах."}</p>
+              {data.impulseEntryDiagnostic?.at && <small>Остання спроба: {date(data.impulseEntryDiagnostic.at)}</small>}
+              {data.publicPaperApproximation && <p className="muted">Публічна 1x paper-модель: реальні котирування та стакан Binance, орієнтовні комісії, ліквідація не моделюється. Це не точна копія біржового виконання.</p>}
             </div>
           )}
           {data.siteUniverse && (

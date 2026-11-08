@@ -189,7 +189,7 @@ export class MarketData {
     return this.once(`prices:${exchange}`, async () => {
       const raw =
         exchange === "binance"
-          ? await this.request(exchange, "/fapi/v2/ticker/price")
+          ? await this.request(exchange, "/fapi/v1/ticker/price")
           : await this.request(exchange, "/v5/market/tickers", {
               category: "linear",
             });
@@ -208,7 +208,7 @@ export class MarketData {
   }
   async getExecutionBook(exchange: Exchange, symbol: string): Promise<ExecutionBook> {
     const raw = exchange === "binance"
-      ? await this.request(exchange, "/fapi/v1/depth", { symbol, limit: 1000 })
+      ? await this.request(exchange, "/fapi/v1/depth", { symbol, limit: 100 })
       : await this.request(exchange, "/v5/market/orderbook", { category: "linear", symbol, limit: 1000 });
     const row = exchange === "binance" ? raw : raw.result;
     return { at: Number(exchange === "binance" ? raw.T || raw.E : row.ts),
@@ -219,7 +219,7 @@ export class MarketData {
     if (exchange === "binance") {
       const [mark, last] = await Promise.all([
         this.request(exchange, "/fapi/v1/premiumIndex", { symbol }),
-        this.request(exchange, "/fapi/v2/ticker/price", { symbol }),
+        this.request(exchange, "/fapi/v1/ticker/price", { symbol }),
       ]);
       return { at: Number(mark.time), mark: Number(mark.markPrice), last: Number(last.price), nextFundingAt: Number(mark.nextFundingTime) };
     }
