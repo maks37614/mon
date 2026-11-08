@@ -151,3 +151,67 @@ test("stale websocket prevents BOTH manual and automatic entries even if previou
   assert.equal(trading.snapshot().formations[0].canEnter,false);
   await assert.rejects(trading.enter("impulse-one"),/WebSocket недоступний/);
 });
+
+
+test("AUTO paper opens a real-market-priced virtual position WITHOUT Binance account keys",async t=>{
+  const dir=mkdtempSync(path.join(process.cwd(),".test-impulse-"));
+  const store=new Store(dir);
+  t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true});});
+  store.set("settings",{...DEFAULT_SETTINGS,mode:"paper",exchange:"binance",
+    timeframes:["1m"],formationTypes:["Impulse Breakout"],
+    maxSignalAgeSeconds:45,initialBalance:1000,
+    orderNotionalUsdt:25,leverage:1,paperFeeMode:"account",
+    autoEntries:true,entryIntervalSeconds:5});
+  const now=Date.now();
+  const signal={
+    id:"impulse-public",exchange:"binance",symbol:"BTCUSDT",timeframe:"1m",
+    formation:"Impulse Breakout",direction:"LONG",entryPrice:100,currentPrice:100,
+    stopLoss:99.75,takeProfit:100.45,confidence:90,
+    analysisVersion:FORMATION_ANALYSIS_VERSION,status:"confirmed",
+    candleAt:now-1000,detectedAt:now-1000,description:"Live paper only test",
+  };
+  store.set("signals",[signal]);
+  let publicCalls=0;
+  const market:any={
+    getPrices:async(exchange:string)=>{
+      assert.equal(exchange,"binance");publicCalls++;
+      return {at:Date.now(),data:{BTCUSDT:100}};
+    },
+    getMarkets:async()=>[{symbol:"BTCUSDT",base:"BTC",quantityStep:0.001,
+      minQuantity:0.001,minNotional:5,tickSize:0.01,maxQuantity:10000}],
+    getContractState:async()=>{publicCalls++;return {
+      at:Date.now(),mark:100,last:100,nextFundingAt:Date.now()+3600_000,
+    }},
+    getExecutionBook:async()=>{publicCalls++;return {
+      at:Date.now(),bids:[[99.99,1000],[99.98,1000]],
+      asks:[[100.01,1000],[100.02,1000]],
+    }},
+  };
+  const trader=new Trading(store,market,
+    new Vault(store,randomBytes(32).toString("base64")),{} as any,
+    false,undefined,true,()=>true);
+  assert.equal(trader.snapshot().publicPaperApproximation,true);
+  await trader.enter("impulse-public");
+  const state=trader.snapshot();
+  assert.equal(state.positions.length,1);
+  assert.equal(state.positions[0].symbol,"BTCUSDT");
+  assert.equal(state.positions[0].direction,"LONG");
+  assert.ok(state.positions[0].entryPrice>100);
+  assert.equal(state.positions[0].paper.tiers.length,0);
+  assert.ok(state.positions[0].paper.warnings.includes("liquidation-not-modeled"));
+  assert.equal(state.stats.balance<1000,true);
+  assert.ok(publicCalls>=3);
+  assert.equal(trader.liveAllowed,false);
+});
+
+test("Binance paper without keys does not enable leverage higher than 1x",async t=>{
+  const dir=mkdtempSync(path.join(process.cwd(),".test-impulse-"));
+  const store=new Store(dir);
+  t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true});});
+  store.set("settings",{...DEFAULT_SETTINGS,leverage:10,mode:"paper",
+    exchange:"binance",timeframes:["1m"],formationTypes:["Impulse Breakout"]});
+  const trader=new Trading(store,{} as any,
+    new Vault(store,randomBytes(32).toString("base64")),{} as any,false,undefined,true,()=>true);
+  assert.equal(trader.settings().leverage,1);
+  assert.equal(trader.liveAllowed,false);
+});
