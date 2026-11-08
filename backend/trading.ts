@@ -699,10 +699,10 @@ export class Trading {
     // We explicitly DO NOT fabricate Binance's signed leverage brackets or infer liquidation.
     // The separate public-only approximation is 1x, fully collateralized, with manual fees.
     const publicOnly = this.impulseOnly && s.exchange === "binance" &&
-      !this.vault.status("binance").configured;
+      !this.vault.status("binance").verified;
     if (publicOnly && s.leverage!==1)
       throw new Error("AUTO: публічна paper-модель доступна лише з плечем 1x");
-    const fee = publicOnly ? {rate:s.takerFeePercent / 100,at:Date.now(),source:"manual-public-estimate"}
+    const fee = publicOnly ? {rate:s.takerFeePercent / 100,at:Date.now(),source:"manual"}
       : s.paperFeeMode === "manual" ? { rate: s.takerFeePercent / 100, at: Date.now(), source: "manual" }
       : await this.gateway.takerRate(s.exchange, symbol);
     const [tiers, state] = await Promise.all([
