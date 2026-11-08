@@ -86,6 +86,9 @@ export class SelectiveKlineStreams {
   private reconnectTimer:ReturnType<typeof setTimeout> | null=null;
   private houseTimer:ReturnType<typeof setInterval> | null=null;
   private bootstrapTimer:ReturnType<typeof setInterval> | null=null;
+  private controlTimer:ReturnType<typeof setInterval> | null=null;
+  private addStreams=new Set<string>();
+  private removeStreams=new Set<string>();
   private connectingSince=0;
   private attempts=0;
   private subscriptionId=1;
@@ -111,16 +114,22 @@ export class SelectiveKlineStreams {
     this.connect();
     this.houseTimer=setInterval(()=>this.housekeeping(),5_000);
     this.bootstrapTimer=setInterval(()=>void this.bootstrapNext(),1_000);
+    // Batch all subscription changes into <=2 control frames per second.
+    // This is well under Binance's per-connection control-message limits.
+    this.controlTimer=setInterval(()=>this.flushControls(),800);
     this.houseTimer.unref?.();
     this.bootstrapTimer.unref?.();
+    this.controlTimer.unref?.();
   }
 
   stop(){
     this.running=false;this.state="stopped";
     if(this.houseTimer)clearInterval(this.houseTimer);
     if(this.bootstrapTimer)clearInterval(this.bootstrapTimer);
+    if(this.controlTimer)clearInterval(this.controlTimer);
     if(this.reconnectTimer)clearTimeout(this.reconnectTimer);
-    this.houseTimer=null;this.bootstrapTimer=null;this.reconnectTimer=null;
+    this.houseTimer=null;this.bootstrapTimer=null;this.controlTimer=null;this.reconnectTimer=null;
+    this.addStreams.clear();this.removeStreams.clear();
     const socket=this.socket;this.socket=null;
     socket?.close();
     this.tracked.clear();
@@ -163,7 +172,8 @@ export class SelectiveKlineStreams {
       lastBootstrapAttempt:0,bootstrapPending:false,bootstrapped:false,
     };
     this.tracked.set(symbol,record);
-    this.sendControl("SUBSCRIBE",[symbol]);
+    this.removeStreams.delete(symbol);
+    this.addStreams.add(symbol);
     void this.bootstrapNext();
     return true;
   }
@@ -180,7 +190,9 @@ export class SelectiveKlineStreams {
     socket.addEventListener("open",()=>{
       if(!this.running || this.socket!==socket)return;
       this.state="live";this.attempts=0;this.lastError=null;
-      for(const symbol of this.tracked.keys())this.sendControl("SUBSCRIBE",[symbol]);
+      this.removeStreams.clear();
+      for(const symbol of this.tracked.keys())this.addStreams.add(symbol);
+      this.flushControls();
     });
     socket.addEventListener("message",(event:any)=>{
       if(!this.running || this.socket!==socket)return;
@@ -212,6 +224,7 @@ export class SelectiveKlineStreams {
   private reconnect(){
     if(!this.running || this.reconnectTimer)return;
     this.state="reconnecting";this.lastEventAt=0;
+    this.addStreams.clear();this.removeStreams.clear();
     const old=this.socket;this.socket=null;
     old?.close();
     // Never use pre-reconnect bars with a silent gap.
@@ -227,6 +240,18 @@ export class SelectiveKlineStreams {
     this.reconnectTimer.unref?.();
   }
 
+  private flushControls(){
+    if(!this.socket || this.socket.readyState!==1 || this.state!=="live")return;
+    if(this.removeStreams.size){
+      const symbols=[...this.removeStreams];
+      this.removeStreams.clear();
+      this.sendControl("UNSUBSCRIBE",symbols);
+    }else if(this.addStreams.size){
+      const symbols=[...this.addStreams];
+      this.addStreams.clear();
+      this.sendControl("SUBSCRIBE",symbols);
+    }
+  }
   private sendControl(method:"SUBSCRIBE"|"UNSUBSCRIBE",symbols:string[]){
     const socket=this.socket;
     if(!socket || socket.readyState!==1 || this.state!=="live" || !symbols.length)return;
@@ -240,7 +265,8 @@ export class SelectiveKlineStreams {
 
   private unwatch(symbol:string){
     if(!this.tracked.delete(symbol))return;
-    this.sendControl("UNSUBSCRIBE",[symbol]);
+    if(this.addStreams.delete(symbol))return; // Not sent yet.
+    this.removeStreams.add(symbol);
   }
 
   private housekeeping(){
@@ -250,7 +276,7 @@ export class SelectiveKlineStreams {
       this.reconnect();
     }
     if(this.state==="live" && this.tracked.size>0 &&
-       this.now()-this.lastEventAt>25_000 && this.lastEventAt>0){
+       this.now()-Math.max(this.lastEventAt,this.connectingSince)>25_000){
       this.lastError="Kline WebSocket перестав надсилати свічки";
       this.reconnect();
     }
