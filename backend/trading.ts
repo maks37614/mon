@@ -231,7 +231,7 @@ export class Trading {
       logs: this.store.get<any[]>("logs", []),
       liveAllowed: this.liveAllowed,
       impulseEntryDiagnostic: this.impulseOnly ? this.store.get("auto:entry-diagnostic",null) : null,
-      publicPaperApproximation: this.impulseOnly && !this.vault.status("binance").configured,
+      publicPaperApproximation: this.impulseOnly && !this.vault.status("binance").verified,
       credentials: {
         binance: this.vault.status("binance"),
         bybit: this.vault.status("bybit"),
