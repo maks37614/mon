@@ -22,6 +22,7 @@ const MAX_CONNECTING_MS = 20_000;
 const SYMBOL = /^[A-Z0-9]{3,30}USDT$/;
 
 type StreamSocket = Pick<WebSocket, "addEventListener" | "send" | "close" | "readyState">;
+export type KlineSocketFactory = (url:string)=>StreamSocket;
 type Tracked = {
   symbol: string;
   candles: Candle[];
