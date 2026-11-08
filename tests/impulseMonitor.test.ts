@@ -61,26 +61,26 @@ test("1m confirmation rejects weak volume/no breakout and accepts real intraminu
   assert.equal(confirmImpulse(candidate(),noMove,now),null);
 });
 
-test("monitor uses one Binance websocket, filters inactive/non-USDT/COIN-M, and no h00k requests",async t=>{
+test("monitor uses ONE all-market stream plus bounded kline stream, with only optional one-time REST history seed",async t=>{
   const dir=mkdtempSync(path.join(process.cwd(),".test-impulse-"));
   const store=new Store(dir);
   t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true});});
   store.set("settings",{stopLossPercent:0.25,takeProfitPercent:0.45});
-  let clock=now-20_000,created=0,marketsCalls=0,candlesCalls=0;
+  let clock=now-20_000,tickerCreated=0,klineCreated=0,marketsCalls=0,candlesCalls=0;
   class FakeSocket {
     private events=new Map<string,Array<(event:any)=>void>>();
     readyState=1;
+    sent:any[]=[];
     addEventListener(event:string,handler:(event:any)=>void){
       const handlers=this.events.get(event)||[];
       handlers.push(handler);
       this.events.set(event,handlers);
     }
-    emit(event:string,data?:any){
-      for(const handler of this.events.get(event)||[])handler(data);
-    }
+    send(raw:string){this.sent.push(JSON.parse(raw));}
+    emit(event:string,data?:any){for(const fn of this.events.get(event)||[])fn(data);}
     close(){this.readyState=3;this.emit("close");}
   }
-  let socket!:FakeSocket;
+  let ticker!:FakeSocket,kline!:FakeSocket;
   const m=new ImpulseMonitor(store,{
     status:()=>({}),
     weightStatus:()=>({used:100,observedAt:Date.now(),localBudget:1200,pausedUntil:null}),
@@ -92,43 +92,61 @@ test("monitor uses one Binance websocket, filters inactive/non-USDT/COIN-M, and 
     getCandles:async(exchange:string,symbol:string,tf:string,limit:number)=>{
       assert.equal(exchange,"binance");
       assert.equal(symbol,"COINUSDT");
-      assert.equal(tf,"1m");
-      assert.equal(limit,31);
+      assert.equal(tf,"1m");assert.equal(limit,31);
       candlesCalls++;
-      return makeCandles();
+      return makeCandles().slice(-31);
     },
   } as any,(url:string)=>{
-    assert.equal(url,IMPULSE_STREAM_URL);
-    created++;
-    socket=new FakeSocket();
-    return socket as any;
-  },()=>clock);
+    assert.equal(url,IMPULSE_STREAM_URL);tickerCreated++;
+    ticker=new FakeSocket();return ticker as any;
+  },()=>clock,(url:string)=>{
+    assert.equal(url,"wss://fstream.binance.com/market/stream");klineCreated++;
+    kline=new FakeSocket();return kline as any;
+  });
   await m.start();
   t.after(()=>m.stop());
-  assert.equal(created,1);
+  assert.equal(tickerCreated,1);assert.equal(klineCreated,1);
   assert.equal(marketsCalls,1);
-  assert.equal(m.status().markets,2);
-  socket.emit("open");
-  const ticker=(at:number,price:number,other:any={})=>
+  ticker.emit("open");kline.emit("open");
+  const quote=(at:number,price:number,other:any={})=>
     ({e:"24hrTicker",s:"COINUSDT",E:at,c:String(price),q:"1234",st:1,...other});
-  socket.emit("message",{data:JSON.stringify([
-    ticker(clock,100),
-    ticker(clock,100,{s:"UNKNOWNUSDT"}),
-    ticker(clock,100,{st:2}),
+  ticker.emit("message",{data:JSON.stringify([
+    quote(clock,100),quote(clock,100,{s:"UNKNOWNUSDT"}),
+    quote(clock,100,{st:2}),
   ])});
   clock=now;
-  socket.emit("message",{data:JSON.stringify([
-    ticker(clock,101.1),
-    ticker(clock,102,{s:"OTHUSDT",q:"0"}),
+  ticker.emit("message",{data:JSON.stringify([
+    quote(clock,101.1),quote(clock,102,{s:"OTHUSDT",q:"0"}),
   ])});
   assert.equal(m.status().queue,1);
-  await (m as any).verifyNext();
+  assert.ok(kline.sent.some(req=>req.method==="SUBSCRIBE" && req.params[0]==="coinusdt@kline_1m"));
+  await new Promise(resolve=>setImmediate(resolve));
+  const current=makeCandles().at(-1)!;
+  const k={t:current.time,s:"COINUSDT",i:"1m",o:String(current.open),
+    c:String(current.close),h:String(current.high),l:String(current.low),
+    v:String(current.volume),x:false};
+  kline.emit("message",{data:JSON.stringify({
+    stream:"coinusdt@kline_1m",
+    data:{e:"kline",E:clock,s:"COINUSDT",k}
+  })});
   assert.equal(candlesCalls,1);
   assert.equal(m.status().found,1);
+  assert.equal(m.status().klineStatus.activeStreams,1);
+  assert.equal(m.status().klineStatus.warmStreams,1);
+  assert.equal(m.isFresh(),true);
   const signals=store.get<any[]>("signals",[]);
   assert.equal(signals.length,1);
   assert.equal(signals[0].symbol,"COINUSDT");
-  assert.equal(m.status().tracked,2); // Both active futures are tracked, even if only one triggers.
+  assert.equal(m.status().tracked,2);
+  for(let i=0;i<10;i++){
+    clock+=50;
+    kline.emit("message",{data:JSON.stringify({
+      stream:"coinusdt@kline_1m",
+      data:{e:"kline",E:clock,s:"COINUSDT",k}
+    })});
+  }
+  assert.equal(candlesCalls,1,"live updates after bootstrap must NOT call REST again");
+  assert.equal(m.status().found,1,"one signal per candle, not repeated on every WS tick");
   m.stop();
   assert.equal(m.status().state,"stopped");
 });
