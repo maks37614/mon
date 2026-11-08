@@ -47,7 +47,8 @@ export function confirmImpulse(
   const current=candles.at(-1)!;
   const previous=candles.slice(-21,-1);
   if(previous.length!==20 || previous.some((c,i)=>c.volume<0 ||
-      !Number.isFinite(c.volume) || (i>0 && c.time-previous[i-1].time!==60_000))) return null;
+      !Number.isFinite(c.volume) || (i>0 && c.time-previous[i-1].time!==60_000)) ||
+      current.time-previous.at(-1)!.time!==60_000) return null;
   if(!Number.isFinite(current.time) || now-current.time<10_000 || now-current.time>65_000 ||
      current.open<=0 || current.close<=0 || current.high<current.low || current.volume<=0) return null;
   if(Math.abs(candidate.price/current.close-1)>0.006) return null;

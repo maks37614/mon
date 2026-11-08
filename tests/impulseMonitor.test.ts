@@ -59,6 +59,9 @@ test("1m confirmation rejects weak volume/no breakout and accepts real intraminu
   assert.equal(confirmImpulse({...candidate(),at:now-20_000},makeCandles(),now),null);
   const noMove=makeCandles(); noMove.at(-1)!.close=100.3;
   assert.equal(confirmImpulse(candidate(),noMove,now),null);
+  const missingMinute=makeCandles(); missingMinute.at(-2)!.time-=60_000;
+  assert.equal(confirmImpulse(candidate(),missingMinute,now),null,
+    "missing one closed minute cannot be treated as a confirmed 20m breakout");
 });
 
 test("monitor uses ONE all-market stream plus bounded kline stream, with only optional one-time REST history seed",async t=>{
