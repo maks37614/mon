@@ -47,6 +47,7 @@ export function maintenance(tiers: RiskTier[], notional: number) {
   return Math.max(0, notional * tier.rate - tier.deduction);
 }
 export function liquidationPrice(p: { direction: "LONG" | "SHORT"; entryPrice: number; quantity: number }, state: PaperState) {
+  if (state.warnings.includes("liquidation-not-modeled")) return 0;
   const sign = p.direction === "LONG" ? 1 : -1;
   const margin = state.marginBalance ?? state.initialMargin - state.fundingCost;
   for (const tier of state.tiers) {
@@ -60,6 +61,7 @@ export function liquidationPrice(p: { direction: "LONG" | "SHORT"; entryPrice: n
   throw new Error("Немає рівня ризику для розрахунку ліквідації");
 }
 export function liquidatable(p: { direction: "LONG" | "SHORT"; entryPrice: number; quantity: number }, state: PaperState, mark: number) {
+  if (state.warnings.includes("liquidation-not-modeled")) return false;
   const equity = (state.marginBalance ?? state.initialMargin - state.fundingCost) + (mark - p.entryPrice) * p.quantity * (p.direction === "LONG" ? 1 : -1);
   return equity <= maintenance(state.tiers, mark * p.quantity) + (state.closeFeeReserve || 0);
 }

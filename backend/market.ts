@@ -13,6 +13,7 @@ export class MarketData {
   private pacing = new Mutex();
   private nextRequest = 0;
   private blocked = new Map<Exchange, number>();
+  private lastWeight: {used:number;at:number} | null = null;
   private markets = new Map<Exchange, { expires: number; data: Market[] }>();
   private prices = new Map<
     Exchange,
@@ -27,6 +28,14 @@ export class MarketData {
   ) {}
   status() {
     return Object.fromEntries(this.blocked);
+  }
+  weightStatus() {
+    return {
+      used: this.lastWeight?.used ?? null,
+      observedAt: this.lastWeight?.at ?? null,
+      localBudget: this.weightBudget,
+      pausedUntil: this.blocked.get("binance") || null,
+    };
   }
   private async request(
     exchange: Exchange,
@@ -56,15 +65,19 @@ export class MarketData {
       headers: { Accept: "application/json" },
       redirect: "error",
     });
-    if (
-      exchange === "binance" &&
-      Number(response.headers.get("x-mbx-used-weight-1m") || 0) >=
-        this.weightBudget
-    )
-      this.blocked.set(
-        exchange,
-        Math.ceil(Date.now() / 60_000) * 60_000 + 1000,
-      );
+    if (exchange === "binance") {
+      const used = Number(response.headers.get("x-mbx-used-weight-1m"));
+      if (Number.isFinite(used) && used > 0) {
+        this.lastWeight = {used, at:Date.now()};
+        // Binance counts all clients sharing the public IP. The local threshold
+        // is deliberately below the exchange limit and applies only to auto-mon.
+        if (used >= this.weightBudget)
+          this.blocked.set(
+            exchange,
+            Math.ceil(Date.now() / 60_000) * 60_000 + 1000,
+          );
+      }
+    }
     if ([418, 429].includes(response.status)) {
       const retry = Number(response.headers.get("retry-after")) || 60;
       this.blocked.set(
@@ -189,7 +202,7 @@ export class MarketData {
     return this.once(`prices:${exchange}`, async () => {
       const raw =
         exchange === "binance"
-          ? await this.request(exchange, "/fapi/v2/ticker/price")
+          ? await this.request(exchange, "/fapi/v1/ticker/price")
           : await this.request(exchange, "/v5/market/tickers", {
               category: "linear",
             });
@@ -208,7 +221,7 @@ export class MarketData {
   }
   async getExecutionBook(exchange: Exchange, symbol: string): Promise<ExecutionBook> {
     const raw = exchange === "binance"
-      ? await this.request(exchange, "/fapi/v1/depth", { symbol, limit: 1000 })
+      ? await this.request(exchange, "/fapi/v1/depth", { symbol, limit: 100 })
       : await this.request(exchange, "/v5/market/orderbook", { category: "linear", symbol, limit: 1000 });
     const row = exchange === "binance" ? raw : raw.result;
     return { at: Number(exchange === "binance" ? raw.T || raw.E : row.ts),
@@ -219,7 +232,7 @@ export class MarketData {
     if (exchange === "binance") {
       const [mark, last] = await Promise.all([
         this.request(exchange, "/fapi/v1/premiumIndex", { symbol }),
-        this.request(exchange, "/fapi/v2/ticker/price", { symbol }),
+        this.request(exchange, "/fapi/v1/ticker/price", { symbol }),
       ]);
       return { at: Number(mark.time), mark: Number(mark.markPrice), last: Number(last.price), nextFundingAt: Number(mark.nextFundingTime) };
     }

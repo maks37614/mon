@@ -1,0 +1,37 @@
+# Standalone auto.mon project; intentionally unrelated to h00k-app, krystian-mon and evgen-mon.
+name: auto_mon
+services:
+  auto-mon:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: auto-mon
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ../.env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3010"
+      DATA_DIR: /data
+      APP_ORIGIN: https://auto.h00k.top
+      SCHEDULER_MODE: internal
+      ENABLE_LIVE_TRADING: "false"
+      AUTO_H00K_TOP10: "false"
+      AUTO_IMPULSE_ALL: "true"
+      BINANCE_WEIGHT_BUDGET: "1200"
+    ports:
+      - "127.0.0.1:3027:3010"
+    volumes:
+      - auto_mon_data:/data
+    cpus: 0.75
+    mem_limit: 512m
+    pids_limit: 128
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  auto_mon_data:
+    name: auto_mon_data

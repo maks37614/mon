@@ -14,6 +14,7 @@ export const FORMATIONS = [
   "Falling Wedge",
   "Bull Flag",
   "Bear Flag",
+  "Impulse Breakout",
 ];
 export type Exchange = "binance" | "bybit";
 export type Mode = "paper" | "live";

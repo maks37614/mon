@@ -16,6 +16,7 @@ import type { MarketData } from "./market";
 import type { Vault } from "./security";
 import { depthFill, liquidationPrice, liquidatable, validTiers, type PaperState } from "./paperModel";
 import { PaperFeed, type PriceTick } from "./paperFeed";
+import type { SiteUniverse } from "./siteUniverse";
 import {
   ExchangeGateway,
   definitiveRejection,
@@ -81,6 +82,7 @@ export class Trading {
   private lastLiveCycle = 0;
   private paperGaps = new Set<string>();
   private paperErrorLog = new Map<string, number>();
+  private impulseRejectLog = new Map<string, number>();
   private paperWatched = new Map<string, Position>();
   private paperTicks = new Map<string, PriceTick & { lastAt?: number; markAt?: number; trigger?: PaperState["closeTrigger"] }>();
   private feed = new PaperFeed((exchange, symbol, tick) => this.paperTick(exchange, symbol, tick),
@@ -94,10 +96,20 @@ export class Trading {
     private vault: Vault,
     private gateway: ExchangeGateway,
     readonly liveAllowed: boolean,
+    private siteUniverse?: SiteUniverse,
+    private impulseOnly = false,
+    private impulseStreamLive?: () => boolean,
   ) {}
   settings() {
     const saved = this.store.get<Partial<Settings>>("settings", {});
-    return { ...structuredClone(DEFAULT_SETTINGS), ...saved };
+    const current={ ...structuredClone(DEFAULT_SETTINGS), ...saved };
+    return this.impulseOnly ? {
+      ...current,exchange:"binance" as const,mode:"paper" as const,
+      timeframes:["1m"],formationTypes:["Impulse Breakout"],confirmedOnly:true,
+      minScore:75,maxSignalAgeSeconds:Math.min(current.maxSignalAgeSeconds,45),
+      reverseEnabled:true,tradingSchedule:{enabled:false,windows:[]},
+      leverage:1,
+    } : current;
   }
   private book(mode: Mode) {
     return this.store.get(
@@ -136,6 +148,16 @@ export class Trading {
         throw new Error(
           "Спочатку закрийте позиції та узгодьте очікуючі ордери",
         );
+      if (this.impulseOnly && (next.reverseEnabled !== true ||
+         next.exchange !== "binance" || next.mode !== "paper" ||
+        next.timeframes.length!==1 || next.timeframes[0]!=="1m" ||
+        next.formationTypes.length!==1 || next.formationTypes[0]!=="Impulse Breakout" ||
+        !next.confirmedOnly)) {
+        throw new Error("AUTO: тільки імпульси Binance Futures, 1m і paper-режим");
+      }
+      if (this.siteUniverse && (next.exchange !== "binance" || next.mode !== "paper")) {
+        throw new Error("AUTO: дозволено лише Binance Futures та тестові ордери на реальному ринку");
+      }
       if (next.mode === "live") {
         if (!this.liveAllowed)
           throw new Error(
@@ -171,7 +193,8 @@ export class Trading {
       wins = history.filter((t) => t.netPnl > 0).length;
     const now = Date.now();
     const formations = this.store.get<Signal[]>("signals", [])
-      .filter((signal) => formationIsVisible(signal, s, now));
+      .filter((signal) => formationIsVisible(signal, s, now) &&
+        (!this.siteUniverse || this.siteUniverse.allows(signal.symbol)));
     return {
       settings: s,
       entrySchedule: tradingScheduleState(s.tradingSchedule, now),
@@ -199,13 +222,17 @@ export class Trading {
         winRate: history.length ? (wins / history.length) * 100 : 0,
         accountAt: b.accountAt || null,
       },
-      signals: formations.filter((signal) => signalAllowsEntry(signal, s, now)),
+      signals: formations.filter((signal) => signalAllowsEntry(signal, s, now) &&
+        (!this.impulseOnly || this.impulseStreamLive?.() === true)),
       formations: formations.map((signal) => ({
-        ...signal, canEnter: signalAllowsEntry(signal, s, now),
+        ...signal, canEnter: signalAllowsEntry(signal, s, now) &&
+          (!this.impulseOnly || this.impulseStreamLive?.() === true),
       })),
       scanner: this.store.get<any>("scanner", {}),
       logs: this.store.get<any[]>("logs", []),
       liveAllowed: this.liveAllowed,
+      impulseEntryDiagnostic: this.impulseOnly ? this.store.get("auto:entry-diagnostic",null) : null,
+      publicPaperApproximation: this.impulseOnly && !this.vault.status("binance").verified,
       credentials: {
         binance: this.vault.status("binance"),
         bybit: this.vault.status("bybit"),
@@ -301,8 +328,28 @@ export class Trading {
                 break;
               try {
                 await this.enterLocked(signal, true);
-              } catch {
-                /* A rejected signal is retried only after the next configured entry interval. */
+                if(this.impulseOnly) {
+                  this.store.set("auto:entry-diagnostic",{
+                    at:Date.now(),symbol:signal.symbol,ok:true,
+                    reason:"Тестова позиція успішно відкрита",
+                  });
+                }
+              } catch(e:any) {
+                if(this.impulseOnly) {
+                  const reason=String(e?.message||"Невідома помилка")
+                    .replace(/([a-zA-Z0-9_=-]{32,})/g,"[hidden]")
+                    .slice(0,180);
+                  this.store.set("auto:entry-diagnostic",{
+                    at:Date.now(),symbol:signal.symbol,ok:false,reason,
+                  });
+                  const category=reason.replace(/\d+(?:\.\d+)?/g,"#");
+                  const last=this.impulseRejectLog.get(category)||0;
+                  if(Date.now()-last>60_000) {
+                    this.impulseRejectLog.set(category,Date.now());
+                    if(this.impulseRejectLog.size>100)this.impulseRejectLog.clear();
+                    this.store.log("WARN",`Тестовий вхід ${signal.symbol} відхилено: ${reason}`);
+                  }
+                }
               }
             }
           }
@@ -332,6 +379,16 @@ export class Trading {
     const s = this.settings(),
       b = this.book(s.mode),
       now = Date.now();
+    if (this.impulseOnly && (s.exchange!=="binance" || s.mode!=="paper" ||
+      signal.exchange!=="binance" || signal.formation!=="Impulse Breakout")) {
+      throw new Error("AUTO: дозволені лише тестові Binance імпульси");
+    }
+    if (this.impulseOnly && this.impulseStreamLive?.() !== true)
+      throw new Error("AUTO: WebSocket недоступний, нові входи заблоковані");
+    if (this.siteUniverse && (s.exchange !== "binance" || s.mode !== "paper" ||
+      signal.exchange !== "binance" || !this.siteUniverse.allows(signal.symbol))) {
+      throw new Error("AUTO: монета не входить у свіжий список 10 активних Binance із h00k.top");
+    }
     if (automatic && (!s.autoEntries || !tradingScheduleState(s.tradingSchedule, now).allowed))
       throw new Error("Автоматичні входи призупинено або зараз поза торговим розкладом");
     if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !Number.isInteger(signal.confidence) ||
@@ -404,9 +461,13 @@ export class Trading {
       }
       if (Math.abs(executionPrice - signal.entryPrice) / signal.entryPrice * 100 > s.slippageTolerancePercent)
         throw new Error("Ціна виконання зі стакана перевищує допустиме відхилення");
+      const noRiskBrackets=paper.warnings.includes("liquidation-not-modeled");
       const tier = paper.tiers.find(t => quantity * executionPrice <= t.cap);
-      if (!tier || s.leverage > tier.maxLeverage || quantity * executionPrice > s.orderNotionalUsdt * 1.000001 ||
-        (market.maxQuantity && quantity > market.maxQuantity)) throw new Error("Обсяг або плече перевищують біржовий ліміт");
+      if ((!noRiskBrackets && (!tier || s.leverage > tier.maxLeverage)) ||
+        (noRiskBrackets && s.leverage!==1) ||
+        quantity * executionPrice > s.orderNotionalUsdt * 1.000001 ||
+        (market.maxQuantity && quantity > market.maxQuantity))
+        throw new Error("Обсяг або плече перевищують допустимий ліміт");
       paper.closeFeeReserve = s.exchange === "bybit" ? executionPrice * quantity * (1 - sign / s.leverage) * paper.takerRate : 0;
       paper.initialMargin = executionPrice * quantity / s.leverage + paper.closeFeeReserve;
       paper.marginBalance = paper.initialMargin;
@@ -635,9 +696,19 @@ export class Trading {
     if (current.trigger) void this.monitor();
   }
   private async newPaperState(s: Settings, symbol: string, reference: number, quantity: number): Promise<PaperState> {
-    const fee = s.paperFeeMode === "manual" ? { rate: s.takerFeePercent / 100, at: Date.now(), source: "manual" } : await this.gateway.takerRate(s.exchange, symbol);
+    // Standalone AUTO can paper-trade from public live data without an exchange account.
+    // We explicitly DO NOT fabricate Binance's signed leverage brackets or infer liquidation.
+    // The separate public-only approximation is 1x, fully collateralized, with manual fees.
+    const publicOnly = this.impulseOnly && s.exchange === "binance" &&
+      !this.vault.status("binance").verified;
+    if (publicOnly && s.leverage!==1)
+      throw new Error("AUTO: публічна paper-модель доступна лише з плечем 1x");
+    const fee = publicOnly ? {rate:s.takerFeePercent / 100,at:Date.now(),source:"manual"}
+      : s.paperFeeMode === "manual" ? { rate: s.takerFeePercent / 100, at: Date.now(), source: "manual" }
+      : await this.gateway.takerRate(s.exchange, symbol);
     const [tiers, state] = await Promise.all([
-      s.exchange === "binance" ? this.gateway.riskTiers(symbol) : this.market.getPublicRiskTiers(symbol),
+      publicOnly ? Promise.resolve([]) :
+        s.exchange === "binance" ? this.gateway.riskTiers(symbol) : this.market.getPublicRiskTiers(symbol),
       this.market.getContractState(s.exchange, symbol),
     ]);
     this.checkContractState(state);
@@ -645,10 +716,11 @@ export class Trading {
     return { version: 1, marginMode: "isolated", leverage: s.leverage, initialMargin: reference * quantity / s.leverage,
       marginBalance: reference * quantity / s.leverage,
       takerRate: fee.rate, feeSource: fee.source, feeAt: fee.at, latencyMs: s.paperLatencyMs,
-      tiers: validTiers(tiers), riskAt: Date.now(), entryReference: reference, entrySlippage: 0,
+      tiers: publicOnly ? [] : validTiers(tiers), riskAt: Date.now(), entryReference: reference, entrySlippage: 0,
       markPrice: state.mark, liquidationPrice: 0, nextFundingAt: state.nextFundingAt,
       fundingCost: 0, fundingEvents: [], fundingCheckedAt: Date.now() - 1,
-      lastObservedAt: Date.now(), lastMarkAt: state.at, lastTradeAt: state.at, warnings: [] };
+      lastObservedAt: Date.now(), lastMarkAt: state.at, lastTradeAt: state.at,
+      warnings: publicOnly ? ["liquidation-not-modeled","manual-fee-estimate"] : [] };
   }
   private checkContractState(state: { at: number; mark: number; last: number; nextFundingAt: number }) {
     if (!Number.isFinite(state.at) || Math.abs(Date.now() - state.at) > 5000 ||
@@ -707,7 +779,7 @@ export class Trading {
         lastAt: Math.max(current.at, arrived?.lastAt || 0), markAt: Math.max(current.at, arrived?.markAt || 0) });
     } else { state.lastMarkAt = tick.markAt; state.lastTradeAt = tick.lastAt; }
     state.markPrice = mark; state.lastObservedAt = Date.now(); p.currentPrice = last;
-    if (Date.now() - state.riskAt > 600_000) {
+    if (!state.warnings.includes("liquidation-not-modeled") && Date.now() - state.riskAt > 600_000) {
       try {
         state.tiers = validTiers(await (p.exchange === "binance" ? this.gateway.riskTiers(p.symbol) : this.market.getPublicRiskTiers(p.symbol)));
         state.riskAt = Date.now();

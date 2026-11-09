@@ -1,0 +1,28 @@
+name: Validate Auto Mon
+on:
+  push:
+    branches:
+      - feature/auto-h00k-top10-binance-paper
+  pull_request:
+    paths:
+      - backend/**
+      - server.ts
+      - tests/**
+      - deploy/auto.compose.yaml
+      - .github/workflows/auto-validate.yml
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.1"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
