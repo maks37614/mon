@@ -107,7 +107,7 @@ export class Trading {
       ...current,exchange:"binance" as const,mode:"paper" as const,
       timeframes:["1m"],formationTypes:["Impulse Breakout"],confirmedOnly:true,
       minScore:75,maxSignalAgeSeconds:Math.min(current.maxSignalAgeSeconds,45),
-      reverseEnabled:false,tradingSchedule:{enabled:false,windows:[]},
+      reverseEnabled:true,tradingSchedule:{enabled:false,windows:[]},
       leverage:1,
     } : current;
   }
@@ -148,7 +148,8 @@ export class Trading {
         throw new Error(
           "Спочатку закрийте позиції та узгодьте очікуючі ордери",
         );
-      if (this.impulseOnly && (next.exchange !== "binance" || next.mode !== "paper" ||
+      if (this.impulseOnly && (next.reverseEnabled !== true ||
+         next.exchange !== "binance" || next.mode !== "paper" ||
         next.timeframes.length!==1 || next.timeframes[0]!=="1m" ||
         next.formationTypes.length!==1 || next.formationTypes[0]!=="Impulse Breakout" ||
         !next.confirmedOnly)) {

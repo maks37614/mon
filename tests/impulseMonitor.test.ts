@@ -204,12 +204,12 @@ test("AUTO paper opens a real-market-priced virtual position WITHOUT Binance acc
     getMarkets:async()=>[{symbol:"BTCUSDT",base:"BTC",quantityStep:0.001,
       minQuantity:0.001,minNotional:5,tickSize:0.01,maxQuantity:10000}],
     getContractState:async()=>{publicCalls++;return {
-      at:Date.now(),mark:phase==="exit"?101.1:100,last:phase==="exit"?101.1:100,nextFundingAt:Date.now()+3600_000,
+      at:Date.now(),mark:phase==="exit"?98.9:100,last:phase==="exit"?98.9:100,nextFundingAt:Date.now()+3600_000,
     }},
     getExecutionBook:async()=>{publicCalls++;return {
       at:Date.now(),
-      bids:phase==="exit"?[[101.09,1000],[101.08,1000]]:[[99.99,1000],[99.98,1000]],
-      asks:phase==="exit"?[[101.11,1000],[101.12,1000]]:[[100.01,1000],[100.02,1000]],
+      bids:phase==="exit"?[[98.89,1000],[98.88,1000]]:[[99.99,1000],[99.98,1000]],
+      asks:phase==="exit"?[[98.91,1000],[98.92,1000]]:[[100.01,1000],[100.02,1000]],
     }},
   };
   const trader=new Trading(store,market,
@@ -220,8 +220,12 @@ test("AUTO paper opens a real-market-priced virtual position WITHOUT Binance acc
   const state=trader.snapshot();
   assert.equal(state.positions.length,1);
   assert.equal(state.positions[0].symbol,"BTCUSDT");
-  assert.equal(state.positions[0].direction,"LONG");
-  assert.ok(state.positions[0].entryPrice>100);
+  assert.equal(trader.settings().reverseEnabled,true);
+  assert.equal(state.positions[0].direction,"SHORT");
+  assert.equal(state.positions[0].intent.signal.direction,"LONG");
+  assert.ok(state.positions[0].entryPrice<100);
+  assert.ok(state.positions[0].takeProfit<state.positions[0].entryPrice);
+  assert.ok(state.positions[0].stopLoss>state.positions[0].entryPrice);
   assert.equal(state.positions[0].paper.tiers.length,0);
   assert.equal(state.positions[0].paper.feeSource,"manual");
   assert.ok(state.positions[0].paper.warnings.includes("liquidation-not-modeled"));
@@ -240,6 +244,9 @@ test("AUTO paper opens a real-market-priced virtual position WITHOUT Binance acc
   assert.equal(closed.positions.length,0);
   assert.equal(closed.history.length,1);
   assert.equal(closed.history[0].reason,"TP");
+  assert.equal(closed.history[0].direction,"SHORT");
+  assert.equal(closed.history[0].signalDirection,"LONG");
+  assert.ok(closed.history[0].netPnl>0);
   assert.ok(closed.history[0].fee>0);
 });
 
@@ -252,5 +259,47 @@ test("Binance paper without keys does not enable leverage higher than 1x",async 
   const trader=new Trading(store,{} as any,
     new Vault(store,randomBytes(32).toString("base64")),{} as any,false,undefined,true,()=>true);
   assert.equal(trader.settings().leverage,1);
+  assert.equal(trader.liveAllowed,false);
+});
+
+
+test("reverse AUTO opens a paper LONG after a bearish impulse, even with legacy reverseEnabled=false",async t=>{
+  const dir=mkdtempSync(path.join(process.cwd(),".test-impulse-"));
+  const store=new Store(dir);
+  t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true});});
+  store.set("settings",{...DEFAULT_SETTINGS,reverseEnabled:false,mode:"paper",
+    exchange:"binance",timeframes:["1m"],formationTypes:["Impulse Breakout"],
+    maxSignalAgeSeconds:45,initialBalance:1000,orderNotionalUsdt:25,
+    leverage:1,autoEntries:true});
+  store.set("signals",[{
+    id:"bearish-impulse",exchange:"binance",symbol:"ETHUSDT",timeframe:"1m",
+    formation:"Impulse Breakout",direction:"SHORT",entryPrice:100,
+    currentPrice:100,stopLoss:100.25,takeProfit:99.55,
+    confidence:90,analysisVersion:FORMATION_ANALYSIS_VERSION,
+    status:"confirmed",candleAt:Date.now()-1000,detectedAt:Date.now()-1000,
+    description:"Live market falling",
+  }]);
+  const market:any={
+    getPrices:async()=>({at:Date.now(),data:{ETHUSDT:100}}),
+    getMarkets:async()=>[{symbol:"ETHUSDT",base:"ETH",quantityStep:0.001,
+      minQuantity:0.001,minNotional:5,tickSize:0.01,maxQuantity:10000}],
+    getContractState:async()=>({
+      at:Date.now(),mark:100,last:100,nextFundingAt:Date.now()+3600_000,
+    }),
+    getExecutionBook:async()=>({at:Date.now(),
+      bids:[[99.99,1000],[99.98,1000]],asks:[[100.01,1000],[100.02,1000]],
+    }),
+  };
+  const trader=new Trading(store,market,
+    new Vault(store,randomBytes(32).toString("base64")),{} as any,
+    false,undefined,true,()=>true);
+  assert.equal(store.get<any>("settings",{}).reverseEnabled,false);
+  assert.equal(trader.settings().reverseEnabled,true);
+  await trader.enter("bearish-impulse");
+  const trade=trader.snapshot().positions[0];
+  assert.equal(trade.direction,"LONG");
+  assert.equal(trade.intent.signal.direction,"SHORT");
+  assert.ok(trade.takeProfit>trade.entryPrice);
+  assert.ok(trade.stopLoss<trade.entryPrice);
   assert.equal(trader.liveAllowed,false);
 });

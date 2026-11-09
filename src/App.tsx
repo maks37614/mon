@@ -399,11 +399,11 @@ function AutoSettingsPanel({data,run}: {
             <p className="muted">Усі активні USDT Futures · WebSocket · реальні котирування · тестові позиції</p></div>
           <button className="primary" type="submit">Зберегти</button>
         </div>
-        <div className="notice">Пошук монет, таймфрейм 1m, підтвердження імпульсів і захист від реальних ордерів налаштовані автоматично.</div>
+        <div className="notice"><strong>ЗВОРОТНІ ВХОДИ:</strong> імпульс вгору → тестовий SHORT; імпульс вниз → тестовий LONG. TP/SL виставляються за напрямком фактичної позиції. Тільки paper-угоди.</div>
         <label className="check">
           <input type="checkbox" checked={form.autoEntries}
             onChange={event=>setForm(prev=>({...prev,autoEntries:event.target.checked}))}/>
-          Автоматично відкривати тестові позиції за імпульсами
+          Автоматично відкривати тестові позиції проти імпульсів
         </label>
         <div className="form-grid">
           {fields.map(field=><label key={field.key}>
@@ -1501,7 +1501,7 @@ export default function App() {
                   <div className="section-heading">
                     <div>
                       <h2>
-                        {data.impulseStatus ? "Імпульси ринку" : "Свіжі формації"}{" "}
+                        {data.impulseStatus ? "Імпульси → зворотні входи" : "Свіжі формації"}{" "}
                         <span className="muted">{signals.length}</span>
                       </h2>
                       <p className="muted">
@@ -1564,6 +1564,7 @@ export default function App() {
                               >
                                 {signal.direction}
                               </span>
+                              {data.impulseStatus && <small>Вхід: {signal.direction === "LONG" ? "SHORT" : "LONG"}</small>}
                             </td>
                             <td>{price(signal.entryPrice)}</td>
                             <td>
@@ -1592,7 +1593,7 @@ export default function App() {
                                 onClick={() => {
                                   if (
                                     confirmLive(
-                                      `Відкрити ${signal.symbol} ${signal.direction} на ${s.orderNotionalUsdt} USDT?`,
+                                      `Відкрити ${signal.symbol} ${data.impulseStatus ? (signal.direction === "LONG" ? "SHORT" : "LONG") : signal.direction} на ${s.orderNotionalUsdt} USDT?`,
                                     )
                                   )
                                     void run(
