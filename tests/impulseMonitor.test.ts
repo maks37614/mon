@@ -222,7 +222,7 @@ test("AUTO paper opens a real-market-priced virtual position WITHOUT Binance acc
   assert.equal(state.positions[0].symbol,"BTCUSDT");
   assert.equal(trader.settings().reverseEnabled,true);
   assert.equal(state.positions[0].direction,"SHORT");
-  assert.equal(state.positions[0].intent.signal.direction,"LONG");
+  assert.equal(store.get<any>("book:paper",{}).positions[0].intent.signal.direction,"LONG");
   assert.ok(state.positions[0].entryPrice<100);
   assert.ok(state.positions[0].takeProfit<state.positions[0].entryPrice);
   assert.ok(state.positions[0].stopLoss>state.positions[0].entryPrice);
@@ -298,7 +298,7 @@ test("reverse AUTO opens a paper LONG after a bearish impulse, even with legacy 
   await trader.enter("bearish-impulse");
   const trade=trader.snapshot().positions[0];
   assert.equal(trade.direction,"LONG");
-  assert.equal(trade.intent.signal.direction,"SHORT");
+  assert.equal(store.get<any>("book:paper",{}).positions[0].intent.signal.direction,"SHORT");
   assert.ok(trade.takeProfit>trade.entryPrice);
   assert.ok(trade.stopLoss<trade.entryPrice);
   assert.equal(trader.liveAllowed,false);
