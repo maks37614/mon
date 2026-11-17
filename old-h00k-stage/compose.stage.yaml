@@ -1,0 +1,40 @@
+# Completely separate from /home/ubuntu/h00k and from mon bot deployments
+name: h00k-old-stage
+services:
+  app:
+    build:
+      context: ./old-site
+      dockerfile: Dockerfile.stage
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:${OLD_STAGE_PORT:-3058}:3000"
+    volumes:
+      - old_stage_data:/app/server/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,noexec,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1024m
+    cpus: 0.50
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+volumes:
+  old_stage_data:
+    name: h00k-old-stage_data
