@@ -66,8 +66,11 @@ export function readHookCandidates(data: unknown, exchange: Exchange, timeframe:
           (direction === "LONG" ? !(stopLoss < entryPrice && entryPrice < takeProfit) : !(takeProfit < entryPrice && entryPrice < stopLoss))) continue;
       const rawScore = v?.confluence?.total ?? pattern.confidence;
       if (!early && !score(rawScore)) continue;
-      const detectedAt = early ? pattern.observedAt : pattern.detectedAt;
-      if (!positive(detectedAt) || detectedAt > now + 2000) continue;
+      const rawDetectedAt = early ? pattern.observedAt : pattern.detectedAt;
+      // Early candidate observedAt comes from Kline.time (epoch seconds); regular IDs use milliseconds.
+      if (!positive(rawDetectedAt)) continue;
+      const detectedAt = early && rawDetectedAt < 10_000_000_000 ? rawDetectedAt*1000 : rawDetectedAt;
+      if (!Number.isSafeInteger(detectedAt) || detectedAt > now + 2000) continue;
       const decisionAt = confirmed ? (sourceStatus === "retest" ? v.regularPlan?.retestClosedAt : v.regularPlan?.breakoutClosedAt) : proof.lastClosedAt;
       if (!positive(decisionAt) || decisionAt > proof.lastClosedAt || decisionAt % interval !== 0) continue;
       const signal: Signal = {
@@ -106,12 +109,14 @@ export class HookFormationSources {
   private errors = new Map<string, string>();
   private generation = 0;
   private retryAt = new Map<string, number>();
+  private earlyJobs = new Map<string,string>();
   invalidate() {
     this.generation++;
     this.snapshots.clear();
     this.jobs.clear();
     this.errors.clear();
     this.retryAt.clear();
+    this.earlyJobs.clear();
   }
   constructor(private fetcher: typeof fetch = fetch, private now: () => number = Date.now) {}
   private async request(path: string, init: RequestInit = {}) {
@@ -123,7 +128,7 @@ export class HookFormationSources {
     if (body?.success !== true) throw new Error("Некоректна відповідь h00k");
     return body;
   }
-  private refreshScope(exchange: Exchange, timeframe: string, source: Source) {
+  private refreshScope(exchange: Exchange, timeframe: string, source: Source, minVolumeUsd:number) {
     const key = scope(exchange, timeframe, source);
     const existing = this.jobs.get(key);
     if (existing) return existing;
@@ -135,17 +140,29 @@ export class HookFormationSources {
       try {
         let data: unknown;
         if (source === "regular") {
-          const query = new URLSearchParams({exchange, timeframe, marketType:"futures", minVolume:"0"});
-          data = (await this.request("/api/screener/scan?" + query)).data;
+          const query = new URLSearchParams({exchange, timeframe, marketType:"futures", minVolume:String(minVolumeUsd)});
+          const body=await this.request("/api/screener/scan?" + query);
+          data=body.data;
+          if (body.count!==undefined && (!Array.isArray(data) || body.count!==data.length))
+            throw new Error("Неповна відповідь звичайних формацій h00k");
         } else {
-          const params = { exchange, marketType:"futures", timeframe, minVolumeUsd:0 };
-          const { scan } = await this.request("/api/screener/early/start", {
-            method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(params),
-          });
+          const params = { exchange, marketType:"futures", timeframe, minVolumeUsd };
+          const known=this.earlyJobs.get(key);
+          const {scan}=known
+            ? await this.request("/api/screener/early/status?"+new URLSearchParams({id:known}))
+            : await this.request("/api/screener/early/start", {
+                method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(params),
+              });
+          if (generation!==this.generation) return;
           if (!scan || scan.params?.exchange !== exchange || scan.params?.marketType !== "futures" ||
-              scan.params?.timeframe !== timeframe || !["running","completed"].includes(scan.status) ||
+              scan.params?.timeframe !== timeframe ||
+              (scan.params.minVolumeUsd!==undefined && scan.params.minVolumeUsd!==minVolumeUsd) ||
+              (known && scan.id!==known) || !["running","completed"].includes(scan.status) ||
               !Array.isArray(scan.missingSources) || scan.missingSources.length || scan.failed > 0)
             throw new Error("Ранній пошук ще не готовий або неповний");
+          if (scan.status==="running" && typeof scan.id==="string" && /^[a-f0-9-]{36}$/i.test(scan.id))
+            this.earlyJobs.set(key,scan.id);
+          else this.earlyJobs.delete(key); // A completed job is refreshed through the normal shared cache.
           data = scan.data;
         }
         if (generation !== this.generation) return;
@@ -173,6 +190,7 @@ export class HookFormationSources {
         // Never keep a last-good allowlist after a failed refresh.
         if (generation !== this.generation) return;
         this.snapshots.delete(key);
+        this.earlyJobs.delete(key);
         this.retryAt.set(key,this.now()+15_000);
         this.errors.set(key, error instanceof Error ? error.message : "Джерело недоступне");
       }
@@ -185,7 +203,7 @@ export class HookFormationSources {
     for (const tf of settings.timeframes) {
       if (!(HOOK_FORMATION_TIMEFRAMES as readonly string[]).includes(tf)) continue;
       for (const source of ["regular","early"] as const) if (enabled(settings,source))
-        tasks.push(this.refreshScope(settings.exchange,tf,source));
+        tasks.push(this.refreshScope(settings.exchange,tf,source,settings.hookMinVolumeUsd ?? 0));
     }
     await Promise.all(tasks);
   }

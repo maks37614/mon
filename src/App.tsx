@@ -549,6 +549,11 @@ function SettingsPanel({
           </div>
         </fieldset>
         <div className="form-grid">
+          <label>Мінімальний обсяг за 24 год (USDT) · джерело h00k
+            <input type="number" min={0} max={1e15} step={1} required value={form.hookMinVolumeUsd}
+              onChange={e=>setForm({...form,hookMinVolumeUsd:e.target.value===""?"":Number(e.target.value)} as Settings)}/>
+            <small>Встанови той самий поріг, що на сторінці формацій h00k.top. 0 — без обмеження.</small>
+          </label>
           {scannerFields.filter(f => f.key === "minScore" || f.key === "scanIntervalSeconds").map((f) => (
             <label key={f.key}>
               {f.label}

@@ -150,7 +150,7 @@ export class Trading {
         if (!this.vault.status(next.exchange).verified)
           throw new Error("Спочатку перевірте API-ключі вибраної біржі");
       }
-      if (this.sources && (next.exchange !== previous.exchange || next.hookRegularFormations !== previous.hookRegularFormations || next.hookEarlyFormations !== previous.hookEarlyFormations || next.timeframes.join(",") !== previous.timeframes.join(","))) {
+      if (this.sources && (next.exchange !== previous.exchange || next.hookRegularFormations !== previous.hookRegularFormations || next.hookEarlyFormations !== previous.hookEarlyFormations || next.hookMinVolumeUsd !== previous.hookMinVolumeUsd || next.timeframes.join(",") !== previous.timeframes.join(","))) {
         this.sources.invalidate();
         this.store.set("signals", []);
       }

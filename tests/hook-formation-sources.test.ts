@@ -68,3 +68,15 @@ test("conflicting duplicate source identity fails closed",async()=>{
  const other={...pattern,validation:{...validation,passed:false}};const source=new HookFormationSources((async()=>Response.json({success:true,data:[{...coin,formations:[pattern,other]}]})) as typeof fetch,()=>now);
  await source.refresh(settings);assert.equal(source.signals(settings).length,0);assert.match(Object.values(source.diagnostics())[0],/дублікати/);
 });
+
+test("early source normalizes seconds and polls a running shared job instead of starting again",async()=>{
+ const id="12345678-1234-1234-1234-123456789abc";let clock=now;const calls:string[]=[];
+ const source=new HookFormationSources((async(input,init)=>{calls.push(String(input));return Response.json({success:true,scan:{id,params:{exchange:"binance",marketType:"futures",timeframe:"1m",minVolumeUsd:50000},status:"running",missingSources:[],failed:0,data:[{...coin,earlyFormations:[{...coin.earlyFormations[0],observedAt:now/1000}]}]}});}) as typeof fetch,()=>clock);
+ const s={...settings,hookRegularFormations:false,hookEarlyFormations:true,confirmedOnly:false,hookMinVolumeUsd:50000};
+ await source.refresh(s);assert.equal(source.signals(s)[0].detectedAt,now);clock+=30000;await source.refresh(s);
+ assert.match(calls[0],/early\/start$/);assert.match(calls[1],/early\/status\?id=/);assert.equal(source.allowsEntry(source.signals(s)[0],s),false);
+});
+test("regular request uses chosen volume and rejects inconsistent response counts",async()=>{
+ let request="";const source=new HookFormationSources((async(input)=>{request=String(input);return Response.json({success:true,count:2,data:[coin]});}) as typeof fetch,()=>now);
+ await source.refresh({...settings,hookMinVolumeUsd:50000});assert.match(request,/minVolume=50000/);assert.equal(source.signals(settings).length,0);assert.match(Object.values(source.diagnostics())[0],/Неповна/);
+});
