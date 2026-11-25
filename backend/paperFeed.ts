@@ -4,6 +4,7 @@ type Socket = Pick<WebSocket, "addEventListener" | "send" | "close" | "readyStat
 
 // Only active paper symbols are subscribed. No trading or private credentials.
 export class PaperFeed {
+  private retryAfter = new Map<string, number>();
   private connections = new Map<string, { socket: Socket; timer: ReturnType<typeof setInterval>; retry?: ReturnType<typeof setTimeout>; close: () => void }>();
   constructor(private receive: (exchange: Exchange, symbol: string, tick: PriceTick) => void,
     private gap: (exchange: Exchange, symbol: string) => void,
@@ -11,9 +12,10 @@ export class PaperFeed {
   sync(symbols: { exchange: Exchange; symbol: string }[]) {
     const wanted = new Set(symbols.map(s => `${s.exchange}:${s.symbol}`));
     for (const [key, c] of this.connections) if (!wanted.has(key)) { this.connections.delete(key); c.close(); }
+    for (const key of this.retryAfter.keys()) if (!wanted.has(key)) this.retryAfter.delete(key);
     for (const { exchange, symbol } of symbols) {
       const key = `${exchange}:${symbol}`;
-      if (!this.connections.has(key)) this.connect(exchange, symbol);
+      if (!this.connections.has(key) && Date.now() >= (this.retryAfter.get(key) || 0)) this.connect(exchange, symbol);
     }
   }
   private connect(exchange: Exchange, symbol: string) {
@@ -21,10 +23,18 @@ export class PaperFeed {
     const url = exchange === "binance"
       ? `wss://fstream.binance.com/market/stream?streams=${lower}@aggTrade/${lower}@markPrice@1s`
       : "wss://stream.bybit.com/v5/public/linear";
-    const socket = this.factory(url); let receivedAt = Date.now(), stopped = false;
+    let socket: Socket;
+    try { socket = this.factory(url); }
+    catch {
+      this.retryAfter.set(key, Date.now()+2000);
+      this.gap(exchange,symbol);
+      return;
+    }
+    this.retryAfter.delete(key);
+    let receivedAt = Date.now(), stopped = false;
     const retry = () => {
       if (stopped) return; stopped = true; this.gap(exchange, symbol); clearInterval(connection.timer);
-      socket.close();
+      try { socket.close(); } catch { /* A failed close does not prevent reconnect. */ }
       connection.retry = setTimeout(() => {
         if (this.connections.get(key) !== connection) return;
         this.connections.delete(key); this.connect(exchange, symbol);
@@ -33,19 +43,25 @@ export class PaperFeed {
     };
     const connection = { socket, timer: setInterval(() => {
       if (Date.now() - receivedAt > 15000) { retry(); return; }
-      if (exchange === "bybit" && socket.readyState === 1) socket.send(JSON.stringify({ op: "ping" }));
+      if (exchange === "bybit" && socket.readyState === 1) {
+        try { socket.send(JSON.stringify({ op: "ping" })); } catch { retry(); }
+      }
     }, 5000), retry: undefined as ReturnType<typeof setTimeout> | undefined,
-    close: () => { stopped = true; clearInterval(connection.timer); clearTimeout(connection.retry); socket.close(); } };
+    close: () => { stopped = true; clearInterval(connection.timer); clearTimeout(connection.retry); try { socket.close(); } catch {} } };
     connection.timer.unref?.(); this.connections.set(key, connection);
     socket.addEventListener("open", () => {
-      if (exchange === "bybit") socket.send(JSON.stringify({ op: "subscribe", args: [`tickers.${symbol}`] }));
+      if (stopped) return;
+      if (exchange === "bybit") {
+        try { socket.send(JSON.stringify({ op: "subscribe", args: [`tickers.${symbol}`] })); } catch { retry(); }
+      }
     });
     socket.addEventListener("message", (event: MessageEvent) => {
       if (stopped) return;
       try {
         const raw = JSON.parse(String(event.data)), row = raw.data || raw;
         if (exchange === "bybit" && (raw.op === "pong" || (raw.op === "ping" && raw.ret_msg === "pong"))) {
-          receivedAt = Date.now(); return;
+          // Heartbeats prove connectivity, not delivery of usable prices.
+          return;
         }
         const at = Number(exchange === "binance" ? row.E : raw.ts);
         if (!Number.isFinite(at) || Math.abs(Date.now() - at) > 5000) return;
@@ -55,8 +71,7 @@ export class PaperFeed {
           tick = row.e === "aggTrade" ? { at, last: Number(row.p) }
             : row.e === "markPriceUpdate" ? { at, mark: Number(row.p) } : { at };
         } else {
-          if (row.symbol !== symbol || raw.topic !== `tickers.${symbol}`) return;
-          receivedAt = Date.now();
+          if (raw.topic !== `tickers.${symbol}` || (row.symbol !== undefined && row.symbol !== symbol)) return;
           tick = { at, ...(row.lastPrice !== undefined ? { last: Number(row.lastPrice) } : {}),
             ...(row.markPrice !== undefined ? { mark: Number(row.markPrice) } : {}) };
         }
@@ -67,5 +82,5 @@ export class PaperFeed {
     });
     socket.addEventListener("error", retry); socket.addEventListener("close", retry);
   }
-  stop() { for (const c of this.connections.values()) c.close(); this.connections.clear(); }
+  stop() { for (const c of this.connections.values()) c.close(); this.connections.clear(); this.retryAfter.clear(); }
 }

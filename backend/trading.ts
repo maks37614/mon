@@ -637,11 +637,17 @@ export class Trading {
     if (this.running) this.feed.sync(positions);
     const ids = new Set(this.paperWatched.keys());
     for (const key of this.paperTicks.keys()) if (!ids.has(key)) this.paperTicks.delete(key);
+    for (const key of this.paperGaps) if (!ids.has(key)) this.paperGaps.delete(key);
     const positionIds = new Set(positions.map(p => p.id));
     for (const id of this.paperErrorLog.keys()) if (!positionIds.has(id)) this.paperErrorLog.delete(id);
   }
   private paperTick(exchange: Exchange, symbol: string, tick: PriceTick) {
     const key = `${exchange}:${symbol}`, previous = this.paperTicks.get(key);
+    const watched = this.paperWatched.get(key);
+    if (!watched || !Number.isFinite(tick.at) || tick.at < watched.openedAt || Math.abs(Date.now()-tick.at)>5000) return;
+    if (tick.last !== undefined && (!Number.isFinite(tick.last) || tick.last<=0)) tick={...tick,last:undefined};
+    if (tick.mark !== undefined && (!Number.isFinite(tick.mark) || tick.mark<=0)) tick={...tick,mark:undefined};
+    if (tick.last === undefined && tick.mark === undefined) return;
     if (tick.last !== undefined && tick.at < (previous?.lastAt || 0)) tick = { ...tick, last: undefined };
     if (tick.mark !== undefined && tick.at < (previous?.markAt || 0)) tick = { ...tick, mark: undefined };
     tick = { at: tick.at, ...(tick.last !== undefined ? { last: tick.last } : {}), ...(tick.mark !== undefined ? { mark: tick.mark } : {}) };
@@ -711,16 +717,20 @@ export class Trading {
       if (e.priceSource !== "settlement-mark" && !state.warnings.includes("funding-mark-estimate")) state.warnings.push("funding-mark-estimate");
     }
     state.fundingCheckedAt = end;
+    // Persist each completed interval before fetching the schedule. Never jump over
+    // unprocessed historical intervals after a long outage.
+    this.save("paper", b);
+    if (end < until) throw new Error("Відновлюється історія funding; наступний пакет у наступному циклі");
     const current = await this.market.getContractState(p.exchange, p.symbol);
     this.checkContractState(current);
     state.nextFundingAt = current.nextFundingAt;
     this.save("paper", b);
-    if (end < until) throw new Error("Відновлюється історія funding; наступний пакет у наступному циклі");
   }
   private async monitorPaper(b: Book, p: Position) {
     await this.ensurePaper(p);
     const state = p.paper!, key = `${p.exchange}:${p.symbol}`, tick = this.paperTicks.get(key);
     if (state.closeFill) { await this.finishPaper(b, p, state.closeFill.reference, state.closeFill.reason); return; }
+    if (state.closeTrigger) { await this.finishPaper(b,p,state.closeTrigger.reference,state.closeTrigger.reason); return; }
     if (Date.now() - state.lastObservedAt > 15000 && !state.warnings.includes("monitoring-gap")) state.warnings.push("monitoring-gap");
     if (this.paperGaps.delete(key) && !state.warnings.includes("stream-gap")) state.warnings.push("stream-gap");
     let last = tick?.last, mark = tick?.mark;

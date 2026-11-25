@@ -306,3 +306,27 @@ test("non-finite simulated order quantities cannot produce a fill",()=>{
   assert.throws(()=>depthFill(book,"buy",Infinity),/Некоректний/);
   assert.throws(()=>depthFill(book,"sell",NaN),/Некоректний/);
 });
+
+test("Bybit symbol-less deltas use the verified topic; socket creation failure can recover",()=>{
+  let now=Date.now();const original=Date.now;Date.now=()=>now;
+  class Socket extends EventTarget { readyState=1; send(_s:string){} close(){} message(data:any){this.dispatchEvent(new MessageEvent("message",{data:JSON.stringify(data)}));} }
+  const socket=new Socket(), ticks:any[]=[];let attempts=0,gaps=0;
+  const feed=new PaperFeed((_e,_s,tick)=>ticks.push(tick),()=>gaps++,()=>{if(++attempts===1)throw Error("offline");return socket as any;});
+  try {const wanted=[{exchange:"bybit" as const,symbol:"BTCUSDT"}];feed.sync(wanted);feed.sync(wanted);assert.equal(attempts,1);assert.equal(gaps,1);
+    now+=2001;feed.sync(wanted);assert.equal(attempts,2);
+    socket.message({topic:"tickers.BTCUSDT",ts:now,data:{lastPrice:"100"}});
+    socket.message({topic:"tickers.BTCUSDT",ts:now,data:{symbol:"ETHUSDT",lastPrice:"1"}});
+    assert.equal(ticks.length,1);assert.equal(ticks[0].last,100);
+  } finally {feed.stop();Date.now=original;}
+});
+test("known paper close resumes without waiting for another price snapshot",async t=>{
+  const f=fixture(t);await f.trading.enter("signal");const p=f.trading.snapshot().positions[0];
+  const b=f.store.get<any>("book:paper",null);b.positions[0].paper.closeTrigger={reason:"SL",at:Date.now(),reference:99};f.store.set("book:paper",b);
+  f.market.getContractState=async()=>{throw Error("price stream offline");};
+  await f.restart().monitor();assert.equal(f.trading.snapshot().positions.length,0);assert.equal(f.trading.snapshot().history[0].reason,"SL");
+});
+test("old pre-entry tick cannot trigger a stop on a new position",async t=>{
+  const f=fixture(t);await f.trading.enter("signal");const p=f.trading.snapshot().positions[0];
+  (f.trading as any).paperTick("binance","BTCUSDT",{at:p.openedAt-1,last:1,mark:1});await f.trading.monitor();
+  assert.equal(f.trading.snapshot().positions.length,1);assert.equal(f.trading.snapshot().history.length,0);
+});

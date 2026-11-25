@@ -259,7 +259,10 @@ export class MarketData {
       if (!Array.isArray(rows) || rows.length >= (exchange === "binance" ? 1000 : 200)) throw new Error("Історія funding неповна");
       for (const row of rows) {
         const at = Number(row.fundingTime || row.fundingRateTimestamp), rate = Number(row.fundingRate);
-        if (at < from || at > to) continue;
+        if (!Number.isSafeInteger(at) || at <= 0 || row.fundingRate == null || row.fundingRate === "" || !Number.isFinite(rate))
+          throw new Error("Некоректний запис funding");
+        if (row.symbol !== undefined && row.symbol !== symbol) throw new Error("Funding іншого контракту");
+        if (at < start || at > end) continue;
         let price = Number(row.markPrice), priceSource = "settlement-mark";
         if (exchange === "bybit") {
           const candle = await this.request(exchange, "/v5/market/mark-price-kline", { category: "linear", symbol, interval: "1", start: at, end: at + 59999, limit: 1 });
