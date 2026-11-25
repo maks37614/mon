@@ -373,3 +373,13 @@ test("a failed paper price refresh immediately blocks new entry until recovery",
  assert.ok(!f.trading.snapshot().formations?.some(x=>x.entryReasons.includes("Очікування актуальних цін відкритих позицій")));
  assert.equal(f.trading.snapshot().positions.length,1);
 });
+
+test("funding ledger rejects null amounts and conflicting duplicate ids",async t=>{
+ const {store}=fixture(t);const vault=new Vault(store,randomBytes(32).toString("base64"));vault.save("binance","fixture","fixture");
+ const row={symbol:"BTCUSDT",time:1000,tranId:"funding-1",income:"-0.5",asset:"USDT"};
+ let data:any[]=[row,row];
+ const gateway=new ExchangeGateway(vault,async()=>({loadMarkets:async()=>{},fapiPrivateGetIncome:async()=>data}));
+ assert.equal(await gateway.fundingCost("binance","BTCUSDT",0,2000),.5);
+ data=[row,{...row,income:"-0.6"}];await assert.rejects(gateway.fundingCost("binance","BTCUSDT",0,2000),/дублікати/);
+ data=[{...row,income:null}];await assert.rejects(gateway.fundingCost("binance","BTCUSDT",0,2000),/Некоректне/);
+});

@@ -206,4 +206,7 @@ export type TradeHistoryEntry = {
   executionSource?: string;
   paper?: import("./paperModel").PaperState;
   fundingCheckedAt?: number;
+  feesCheckedAt?: number;
+  entryOrderId?: string;
+  closingFillIds?: string[];
 };

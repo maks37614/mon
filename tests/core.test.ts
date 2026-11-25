@@ -923,3 +923,16 @@ test("manual confirmation rejects a changed reverse direction",async t=>{
  await f.trading.enter("signal-1","paper",false,"SHORT");
  assert.equal(f.trading.snapshot().positions[0].direction,"SHORT");
 });
+
+test("late fee reconciliation matches original entry and exact exit fills without changing wallet",async t=>{
+ const f=fixture(t,"live");await f.trading.enter("signal-1");
+ const p=f.trading.snapshot().positions[0];await f.trading.closePosition(p.id);
+ const at=Date.now(),exit={id:"exit-a",orderId:"close-a",side:"sell",quantity:p.quantity,price:101,fee:0,feeKnown:false,at};
+ f.broker.closingTrades=async()=>[exit];await f.trading.monitor();
+ const provisional=f.trading.snapshot().history[0];assert.equal(provisional.feesComplete,false);
+ const balance=f.trading.snapshot().stats.balance,orders=f.broker.submitted.length;
+ f.broker.closingTrades=async()=>[{id:"entry-a",orderId:p.entryOrderId,side:"buy",quantity:p.quantity,price:100,fee:.012,feeKnown:true,at:p.openedAt},{...exit,fee:.016,feeKnown:true}];
+ t.mock.method(Date,"now",()=>at+61000);await f.trading.monitor();
+ const final=f.trading.snapshot().history[0];assert.equal(final.feesComplete,true);assert.ok(Math.abs(final.fee-.028)<1e-9);
+ assert.equal(f.trading.snapshot().stats.balance,balance);assert.equal(f.broker.submitted.length,orders);
+});

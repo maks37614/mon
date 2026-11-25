@@ -327,10 +327,17 @@ export class Trading {
             for (const trade of b.history.filter(t => t.fundingComplete === false && Date.now() - t.closedAt >= 60000 && Date.now() - (t.fundingCheckedAt || 0) >= 60000).slice(0, 3)) {
               trade.fundingCheckedAt = Date.now();
               try {
-                trade.fundingCost = await this.gateway.fundingCost(trade.exchange, trade.symbol, trade.openedAt!, trade.closedAt);
+                const funding=await this.gateway.fundingCost(trade.exchange, trade.symbol, trade.openedAt!, trade.closedAt);
+                if(!Number.isFinite(funding)) throw new Error("Некоректна сума funding");
+                trade.fundingCost = funding;
                 trade.fundingComplete = true;
                 trade.netPnl = trade.grossPnl - trade.fee - trade.fundingCost;
               } catch { /* Keep the missing cost explicit and retry later. */ }
+            }
+            for(const trade of b.history.filter(t=>t.feesComplete===false && t.entryOrderId && t.closingFillIds?.length &&
+              Date.now()-t.closedAt>=60_000 && Date.now()-(t.feesCheckedAt||0)>=60_000).sort((a,z)=>(a.feesCheckedAt||0)-(z.feesCheckedAt||0)).slice(0,2)) {
+              trade.feesCheckedAt=Date.now();
+              try { await this.recheckFees(trade); } catch { /* Retain provisional fees and retry later. */ }
             }
             this.save("live", b);
           }
@@ -1005,6 +1012,32 @@ export class Trading {
       this.save("live", b);
     }
   }
+  private async recheckFees(trade:TradeHistoryEntry) {
+    if(!trade.entryOrderId || !trade.closingFillIds?.length || !Number.isFinite(trade.openedAt)) return;
+    const rows=await this.gateway.closingTrades(trade.exchange,trade.symbol,trade.openedAt!,trade.direction);
+    if(!Array.isArray(rows)) throw new Error("Неповна історія комісій");
+    const entrySide=trade.direction==="LONG"?"buy":"sell",exitSide=trade.direction==="LONG"?"sell":"buy";
+    const exitIds=new Set(trade.closingFillIds),seen=new Map<string,typeof rows[number]>();
+    for(const row of rows) {
+      if(!row || !(row.orderId===trade.entryOrderId || exitIds.has(row.id))) continue;
+      if(typeof row.id!=="string" || !row.id || !Number.isFinite(row.quantity) || row.quantity<=0 ||
+         !Number.isFinite(row.fee) || row.feeKnown!==true || !Number.isFinite(row.at) ||
+         row.at<trade.openedAt!-1000 || row.at>trade.closedAt+1000) return;
+      if(exitIds.has(row.id)?row.side!==exitSide:row.side!==entrySide) return;
+      const previous=seen.get(row.id);
+      if(previous && (previous.orderId!==row.orderId || previous.quantity!==row.quantity || previous.fee!==row.fee ||
+        previous.side!==row.side || previous.at!==row.at || previous.price!==row.price)) return;
+      seen.set(row.id,row);
+    }
+    const exits=[...seen.values()].filter(row=>exitIds.has(row.id));
+    const entries=[...seen.values()].filter(row=>!exitIds.has(row.id) && row.orderId===trade.entryOrderId);
+    if(exits.length!==exitIds.size || !sameQuantity(exits.reduce((n,row)=>n+row.quantity,0),trade.quantity) ||
+       !sameQuantity(entries.reduce((n,row)=>n+row.quantity,0),trade.quantity)) return;
+    const entryFee=entries.reduce((n,row)=>n+row.fee,0),exitFee=exits.reduce((n,row)=>n+row.fee,0);
+    if(!Number.isFinite(entryFee+exitFee)) return;
+    trade.entryFee=entryFee;trade.exitFee=exitFee;trade.fee=entryFee+exitFee;
+    trade.netPnl=trade.grossPnl-trade.fee-(trade.fundingCost??0);trade.feesComplete=true;
+  }
   private async finishLive(b: Book, p: Position, reason: string) {
     p.status = "reconciling";
     this.save("live", b);
@@ -1052,7 +1085,9 @@ export class Trading {
       unique.reduce((sum, t) => sum + t.price * t.quantity, 0) / total;
     const entryFills = allFills.filter(t=>p.entryOrderId && t.orderId===p.entryOrderId &&
       t.side===(p.direction==="LONG"?"buy":"sell"));
-    const entryFee = entryFills.length
+    const entryFeesComplete=entryFills.length>0 && sameQuantity(entryFills.reduce((sum,t)=>sum+t.quantity,0),p.originalQuantity) &&
+      entryFills.every(t=>t.feeKnown===true);
+    const entryFee = entryFeesComplete
       ? entryFills.reduce((sum, t) => sum + t.fee, 0)
       : p.entryFee;
     const gross =
@@ -1060,7 +1095,9 @@ export class Trading {
       fee = entryFee + unique.reduce((sum, t) => sum + t.fee, 0);
     const closedAt = Math.max(...unique.map(t => t.at));
     let fundingCost: number | undefined;
-    try { fundingCost = await this.gateway.fundingCost(p.exchange, p.symbol, p.openedAt, closedAt); } catch { /* Never report unavailable funding as a verified zero. */ }
+    try { const value=await this.gateway.fundingCost(p.exchange,p.symbol,p.openedAt,closedAt);
+      if(Number.isFinite(value)) fundingCost=value;
+    } catch { /* Never report unavailable funding as a verified zero. */ }
     b.history.unshift({
       id: p.id,
       exchange: p.exchange,
@@ -1081,14 +1118,13 @@ export class Trading {
       netPnl: gross - fee - (fundingCost || 0),
       entryFee, exitFee: fee - entryFee, fundingCost,
       fundingComplete: fundingCost !== undefined && Date.now() - closedAt >= 60000,
-      fundingCheckedAt: Date.now(), executionSource: "venue-fills",
+      fundingCheckedAt: Date.now(), feesCheckedAt:Date.now(), entryOrderId:p.entryOrderId,
+      closingFillIds:unique.map(t=>t.id), executionSource: "venue-fills",
       openedAt: p.openedAt,
       closedAt,
       reason,
       estimated: false,
-      feesComplete:
-        entryFills.length > 0 && sameQuantity(entryFills.reduce((sum,t)=>sum+t.quantity,0),p.originalQuantity) &&
-        [...entryFills, ...unique].every((t) => t.feeKnown),
+      feesComplete:entryFeesComplete && unique.every(t=>t.feeKnown===true),
     });
     b.history = b.history.slice(0, 1000);
     b.positions = b.positions.filter((x) => x.id !== p.id);

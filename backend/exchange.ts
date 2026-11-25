@@ -82,8 +82,10 @@ export class ExchangeGateway {
     this.paperCache.set(key, { at: Date.now(), value }); return value;
   }
   async fundingCost(exchange: Exchange, symbolId: string, from: number, to: number): Promise<number> {
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from<0 || to<from)
+      throw new Error("Некоректний інтервал funding");
     if (to - from > 90 * 86400_000) throw new Error("Історія funding потребує окремого архіву");
-    const c = await this.paperRead(() => this.client(exchange)), seen = new Set<string>(); let cost = 0;
+    const c = await this.paperRead(() => this.client(exchange)), seen = new Map<string,{at:number;value:number}>(); let cost = 0;
     for (let start = from; start <= to; start += 7 * 86400_000) {
       const end = Math.min(to, start + 7 * 86400_000 - 1);
       let cursor = ""; const cursors = new Set<string>();
@@ -91,19 +93,32 @@ export class ExchangeGateway {
         const raw = await this.paperRead<any>(async () => exchange === "binance"
           ? await c.fapiPrivateGetIncome({ symbol: symbolId, incomeType: "FUNDING_FEE", startTime: start, endTime: end, limit: 1000 })
           : await c.privateGetV5ExecutionList({ category: "linear", symbol: symbolId, execType: "Funding", startTime: start, endTime: end, limit: 100, ...(cursor ? { cursor } : {}) }));
-        const rows = exchange === "binance" ? raw : raw.result?.list;
+        if(exchange==="bybit" && raw?.retCode!=null && Number(raw.retCode)!==0) throw new Error("Bybit не підтвердив історію funding");
+        const rows = exchange === "binance" ? raw : raw?.result?.list;
         if (!Array.isArray(rows) || (exchange === "binance" && rows.length >= 1000)) throw new Error("Історія funding неповна");
         for (const row of rows) {
-          const at = Number(exchange === "binance" ? row.time : row.execTime);
-          if (at < from || at > to || row.symbol !== symbolId) continue;
-          const id = String(exchange === "binance" ? row.tranId : row.execId);
-          const value = Number(exchange === "binance" ? row.income : row.execFee);
-          if (!id || id === "undefined" || !Number.isFinite(at) || !Number.isFinite(value) ||
-            (exchange === "binance" && row.asset !== "USDT")) throw new Error("Некоректне біржове нарахування funding");
-          if (seen.has(id)) continue;
-          seen.add(id); cost += exchange === "binance" ? -value : value;
+          const rawAt=exchange==="binance"?row?.time:row?.execTime;
+          const rawId=exchange==="binance"?row?.tranId:row?.execId;
+          const rawValue=exchange==="binance"?row?.income:row?.execFee;
+          const at=Number(rawAt),value=Number(rawValue),id=String(rawId??"");
+          if(rawAt==null || rawAt==="" || rawValue==null || rawValue==="" || !id ||
+             !Number.isSafeInteger(at) || !Number.isFinite(value) || typeof row?.symbol!=="string")
+            throw new Error("Некоректне біржове нарахування funding");
+          if(row.symbol!==symbolId || at<from || at>to) continue;
+          if((exchange==="binance" && row.asset!=="USDT") ||
+             (exchange==="bybit" && row.feeCurrency!=null && row.feeCurrency!=="USDT"))
+            throw new Error("Валюта funding не підтверджена як USDT");
+          const previous=seen.get(id);
+          if(previous) {
+            if(previous.at!==at || previous.value!==value) throw new Error("Суперечливі дублікати funding");
+            continue;
+          }
+          seen.set(id,{at,value});cost+=exchange==="binance"?-value:value;
+          if(!Number.isFinite(cost)) throw new Error("Некоректна сума funding");
         }
-        cursor = exchange === "bybit" ? raw.result?.nextPageCursor || "" : "";
+        const next=exchange==="bybit"?raw.result?.nextPageCursor:"";
+        if(next!=null && typeof next!=="string") throw new Error("Некоректний курсор funding");
+        cursor=next||"";
         if (cursor && cursors.has(cursor)) throw new Error("Повторний курсор funding");
         cursors.add(cursor);
         if (cursors.size > 100) throw new Error("Забагато сторінок funding");
