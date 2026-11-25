@@ -3,6 +3,7 @@ import type { Store } from "./store";
 import type { MarketData } from "./market";
 import { detectFormations } from "./patterns";
 import { formationIsVisible, signalAllowsEntry } from "./formationState";
+import type { HookFormationSources } from "./hookFormationSources";
 
 export class Scanner {
   running = false;
@@ -10,13 +11,14 @@ export class Scanner {
   constructor(
     private store: Store,
     private market: MarketData,
+    private sources?: HookFormationSources,
   ) {}
   private saveStatus(status: any) {
     const latest = this.store.get<any>("scanner", {});
     this.store.set("scanner", { ...status, lastCronAt: latest.lastCronAt || status.lastCronAt });
   }
   start(force = false, source: "manual" | "cron" | "internal" = "manual") {
-    const settings = this.store.get("settings", DEFAULT_SETTINGS);
+    const settings = { ...DEFAULT_SETTINGS, ...this.store.get("settings", DEFAULT_SETTINGS) };
     let state = this.store.get<any>("scanner", {});
     const now = Date.now();
     if (source === "cron") {
@@ -52,10 +54,16 @@ export class Scanner {
   private async run(settings: Settings, old: any) {
     const signature = `analysis${FORMATION_ANALYSIS_VERSION}:interleaved:${settings.exchange}:${settings.timeframes.join(",")}:${settings.candleLimit}`;
     let cursor = old.signature === signature ? old.cursor || 0 : 0;
+    if (this.sources) await this.sources.refresh(settings);
     const markets = await this.market.getMarkets(settings.exchange);
     const tasks = markets.flatMap((m) =>
       settings.timeframes.map((timeframe) => ({ symbol: m.symbol, timeframe })),
-    );
+    ).filter(target => !this.sources || this.sources.allows({ ...target, exchange: settings.exchange }, settings));
+    if (!tasks.length && this.sources) {
+      this.store.set("signals", []);
+      this.saveStatus({ ...old, signature, cursor: 0, total: 0, symbols: 0, running: false, finishedAt: Date.now(), visibleFormations: 0, entrySignals: 0, sourceErrors: this.sources.diagnostics() });
+      return;
+    }
     if (!tasks.length) throw new Error("Біржа не повернула монети для сканування");
     cursor %= tasks.length;
     let status: any = {
@@ -74,12 +82,13 @@ export class Scanner {
     this.saveStatus(status);
     const existing = this.store
       .get<Signal[]>("signals", [])
-      .filter((signal) => formationIsVisible(signal, settings));
+      .filter((signal) => formationIsVisible(signal, settings) && (!this.sources || this.sources.allows(signal, settings)));
     const signals = new Map(existing.map((s) => [s.id, s]));
     const count = Math.min(settings.scanBatchSize, tasks.length);
     for (let index = 0; index < count; index++) {
       const target = tasks[cursor];
       try {
+        if (this.sources && !this.sources.allows({ ...target, exchange: settings.exchange }, settings)) { cursor = (cursor + 1) % tasks.length; continue; }
         const candles = await this.market.getCandles(
           settings.exchange,
           target.symbol,
@@ -125,7 +134,7 @@ export class Scanner {
         this.store.set(
           "signals",
           [...signals.values()]
-            .filter((signal) => formationIsVisible(signal, settings))
+            .filter((signal) => formationIsVisible(signal, settings) && (!this.sources || this.sources.allows(signal, settings)))
             .slice(-20_000),
         );
       }
@@ -134,19 +143,19 @@ export class Scanner {
     this.store.set(
       "signals",
       [...signals.values()]
-        .filter((signal) => formationIsVisible(signal, settings))
+        .filter((signal) => formationIsVisible(signal, settings) && (!this.sources || this.sources.allows(signal, settings)))
         .slice(-20_000),
     );
     if (!status.successful && status.failed && !status.error)
       status.error = status.errors[0]?.message || "Дані свічок не завантажилися";
-    const retained = [...signals.values()].filter((signal) => formationIsVisible(signal, settings));
+    const retained = [...signals.values()].filter((signal) => formationIsVisible(signal, settings) && (!this.sources || this.sources.allows(signal, settings)));
     this.saveStatus({
       ...status,
       cursor,
       running: false,
       finishedAt: Date.now(),
       visibleFormations: retained.length,
-      entrySignals: retained.filter((signal) => signalAllowsEntry(signal, settings)).length,
+      entrySignals: retained.filter((signal) => signalAllowsEntry(signal, settings) && (!this.sources || this.sources.allowsEntry(signal, settings))).length,
     });
     this.store.log(
       status.error ? "WARN" : "INFO",

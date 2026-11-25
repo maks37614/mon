@@ -10,6 +10,7 @@ import { Store } from "./backend/store";
 import { Auth, Vault, safeEqual } from "./backend/security";
 import { MarketData } from "./backend/market";
 import { Scanner } from "./backend/scanner";
+import { HookFormationSources } from "./backend/hookFormationSources";
 import { Trading } from "./backend/trading";
 import { ExchangeGateway, exchangeError } from "./backend/exchange";
 import { DEFAULT_SETTINGS, type Exchange } from "./backend/config";
@@ -26,6 +27,7 @@ type Options = {
   fetcher?: typeof fetch;
   gatewayFactory?: any;
   weightBudget?: number;
+  formationSources?: HookFormationSources;
 };
 const route =
   (fn: (req: Request, res: Response) => unknown) =>
@@ -56,7 +58,7 @@ export function createApplication(options: Options) {
     options.fetcher,
     options.weightBudget,
   );
-  const scanner = new Scanner(store, market),
+  const scanner = new Scanner(store, market, options.formationSources),
     gateway = new ExchangeGateway(vault, options.gatewayFactory);
   const trading = new Trading(
     store,
@@ -64,6 +66,7 @@ export function createApplication(options: Options) {
     vault,
     gateway,
     options.liveAllowed === true,
+    options.formationSources,
   );
   const auth = new Auth(
     store,
@@ -290,6 +293,7 @@ export function createApplication(options: Options) {
     res.status(400).json({ error: message });
   });
   let scheduler: ReturnType<typeof setInterval> | null = null;
+  let sourceTimer: ReturnType<typeof setInterval> | null = null;
   return {
     app,
     store,
@@ -299,12 +303,18 @@ export function createApplication(options: Options) {
     scanner,
     gateway,
     start() {
+      if (options.formationSources) {
+        const refresh = () => void options.formationSources!.refresh(trading.settings());
+        refresh();
+        sourceTimer = setInterval(refresh, 15_000);
+      }
       trading.start();
       if (options.schedulerMode === "internal")
         scheduler = setInterval(() => scanner.start(false, "internal"), 10_000);
     },
     async stop() {
       if (scheduler) clearInterval(scheduler);
+      if (sourceTimer) clearInterval(sourceTimer);
       await trading.stop();
       if (scanner.task) await scanner.task;
       store.close();
@@ -315,6 +325,7 @@ export function createApplication(options: Options) {
 async function main() {
   const runtime = createApplication({
     directory: process.env.DATA_DIR || "./data",
+    formationSources: new HookFormationSources(),
     origin: process.env.APP_ORIGIN || "https://evgen.h00k.top",
     username: process.env.ADMIN_USERNAME || "admin",
     passwordHash: process.env.ADMIN_PASSWORD_HASH || "",

@@ -489,6 +489,11 @@ function SettingsPanel({
             Лише підтверджені формації
           </label>
         </div>
+        <div className="notice">Джерела монет: тільки формації h00k.top (USDT-ф’ючерси).</div>
+        <div className="check-row">
+          <label className="check"><input type="checkbox" checked={form.hookRegularFormations} onChange={e=>setForm({...form,hookRegularFormations:e.target.checked})}/> Звичайні формації</label>
+          <label className="check"><input type="checkbox" checked={form.hookEarlyFormations} onChange={e=>setForm({...form,hookEarlyFormations:e.target.checked})}/> Ранні формації (лише підтверджений вхід)</label>
+        </div>
         <TradingScheduleSettings value={form.tradingSchedule}
           onChange={tradingSchedule => setForm({ ...form, tradingSchedule })} />
         <label>

@@ -11,6 +11,7 @@ import {
 } from "./config";
 import { Mutex, type Store } from "./store";
 import { formationIsVisible, signalAllowsEntry } from "./formationState";
+import type { HookFormationSources } from "./hookFormationSources";
 import { tradingScheduleState } from "./tradingSchedule";
 import type { MarketData } from "./market";
 import type { Vault } from "./security";
@@ -94,6 +95,7 @@ export class Trading {
     private vault: Vault,
     private gateway: ExchangeGateway,
     readonly liveAllowed: boolean,
+    private sources?: HookFormationSources,
   ) {}
   settings() {
     const saved = this.store.get<Partial<Settings>>("settings", {});
@@ -171,7 +173,7 @@ export class Trading {
       wins = history.filter((t) => t.netPnl > 0).length;
     const now = Date.now();
     const formations = this.store.get<Signal[]>("signals", [])
-      .filter((signal) => formationIsVisible(signal, s, now));
+      .filter((signal) => formationIsVisible(signal, s, now) && (!this.sources || this.sources.allows(signal, s)));
     return {
       settings: s,
       entrySchedule: tradingScheduleState(s.tradingSchedule, now),
@@ -199,9 +201,9 @@ export class Trading {
         winRate: history.length ? (wins / history.length) * 100 : 0,
         accountAt: b.accountAt || null,
       },
-      signals: formations.filter((signal) => signalAllowsEntry(signal, s, now)),
+      signals: formations.filter((signal) => signalAllowsEntry(signal, s, now) && (!this.sources || this.sources.allowsEntry(signal, s))),
       formations: formations.map((signal) => ({
-        ...signal, canEnter: signalAllowsEntry(signal, s, now),
+        ...signal, canEnter: signalAllowsEntry(signal, s, now) && (!this.sources || this.sources.allowsEntry(signal, s)),
       })),
       scanner: this.store.get<any>("scanner", {}),
       logs: this.store.get<any[]>("logs", []),
@@ -332,6 +334,7 @@ export class Trading {
     const s = this.settings(),
       b = this.book(s.mode),
       now = Date.now();
+    if (this.sources && !this.sources.allowsEntry(signal, s)) throw new Error("Монета відсутня у свіжому дозволеному джерелі h00k.top");
     if (automatic && (!s.autoEntries || !tradingScheduleState(s.tradingSchedule, now).allowed))
       throw new Error("Автоматичні входи призупинено або зараз поза торговим розкладом");
     if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !Number.isInteger(signal.confidence) ||
@@ -454,6 +457,7 @@ export class Trading {
     if (Date.now() - signal.candleAt > s.maxSignalAgeSeconds * 1000) throw new Error("Сигнал застарів під час підготовки виконання");
     if (automatic && !tradingScheduleState(s.tradingSchedule).allowed)
       throw new Error("Торгова сесія завершилася під час підготовки входу");
+    if (this.sources && !this.sources.allowsEntry(signal, this.settings())) throw new Error("Формація h00k більше не актуальна; вхід скасовано");
     const intent: Intent = {
       id: orderId(),
       exchange: s.exchange,

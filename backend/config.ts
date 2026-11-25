@@ -33,6 +33,8 @@ export const DEFAULT_SETTINGS = {
   maxSignalAgeSeconds: 180,
   minScore: 75,
   confirmedOnly: true,
+  hookRegularFormations: true,
+  hookEarlyFormations: false,
   autoEntries: false,
   reverseEnabled: false,
   tradingSchedule: structuredClone(DEFAULT_TRADING_SCHEDULE),
@@ -115,7 +117,7 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
     )
       throw new Error(`Параметр ${k}: дозволено ${min}–${max}`);
   }
-  for (const k of ["confirmedOnly", "autoEntries", "reverseEnabled"])
+  for (const k of ["confirmedOnly", "autoEntries", "reverseEnabled", "hookRegularFormations", "hookEarlyFormations"])
     if (typeof s[k as keyof Settings] !== "boolean")
       throw new Error(`Параметр ${k} має бути логічним`);
   if (!["account", "manual"].includes(s.paperFeeMode)) throw new Error("Невідоме джерело комісії симуляції");
