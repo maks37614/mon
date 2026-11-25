@@ -14,6 +14,7 @@ import {
   type Settings,
 } from "../backend/config";
 import { Trading } from "../backend/trading";
+import { HookFormationSources } from "../backend/hookFormationSources";
 import { MarketData } from "../backend/market";
 import { Scanner } from "../backend/scanner";
 import { detectFormations } from "../backend/patterns";
@@ -845,4 +846,43 @@ test("manual order confirmation is checked inside the trading queue",async t=>{
  await assert.rejects(f.trading.closePosition(p.id,"live",true),/режим змінився/);
  assert.equal(f.trading.snapshot().positions.length,1);
  await f.trading.closePosition(p.id,"paper",false);assert.equal(f.trading.snapshot().positions.length,0);
+});
+
+
+test("automatic h00k source entry respects confirmation, pause and duplicate guard in both modes",async t=>{
+  for (const mode of ["paper","live"] as const) {
+    const f=fixture(t,mode);
+    const now=Date.now(),close=Math.floor(now/60000)*60000;
+    const validation={enoughData:true,finiteData:true,closedCandleOnly:true,lookAheadSafe:true,
+      passed:false,confirmed:true,breakoutConfirmed:true,entryMode:"BREAKOUT",
+      regularPlan:{breakoutClosedAt:close,structureActive:true,entryExpired:false,afterEntry:[]},
+      confluence:{total:90}};
+    const coin={symbol:"BTCUSDT",exchange:"binance",marketType:"futures",timeframe:"1m",quoteAsset:"USDT",
+      currentPrice:100,lastUpdated:now,formationData:{contiguous:true,collectedAt:now,lastClosedAt:close},
+      formations:[{id:"auto-site-1",patternKey:"double_bottom",bias:"bullish",status:"breakout",
+        validation,levels:{entryPrice:100,stopLossPrice:99,targetPrice:102},detectedAt:close}]};
+    const source=new HookFormationSources((async()=>Response.json({success:true,data:[coin]})) as typeof fetch);
+    const bot=new Trading(f.store,f.market,f.vault,f.broker,true,source);
+    await bot.updateSettings({autoEntries:true,confirmedOnly:true});
+    await source.refresh(bot.settings());await bot.monitor();
+    assert.equal(bot.snapshot().positions.length,0);
+    validation.passed=true;source.invalidate();await source.refresh(bot.settings());
+    await bot.updateSettings({autoEntries:false});await bot.monitor();
+    assert.equal(bot.snapshot().positions.length,0);
+    await bot.updateSettings({autoEntries:true});await bot.monitor();
+    assert.equal(bot.snapshot().positions.length,1);
+    assert.equal(bot.snapshot().positions[0].symbol,"BTCUSDT");
+    assert.equal(f.broker.submitted.length,mode==="live"?1:0);
+    await bot.monitor();assert.equal(bot.snapshot().positions.length,1);
+    assert.equal(f.broker.submitted.length,mode==="live"?1:0);
+  }
+});
+test("a cooldown-only candidate does not consume the automatic entry interval",async t=>{
+  const f=fixture(t,"paper");
+  await f.trading.updateSettings({autoEntries:true,entryCooldownSeconds:900});
+  f.store.set("book:paper",{balance:1000,startBalance:1000,positions:[],history:[],pending:[],used:{},
+    lastEntries:{BTCUSDT:Date.now()},lastEntryAt:0});
+  await f.trading.monitor();
+  assert.equal(f.store.get<any>("book:paper",{}).lastEntryAt,0);
+  assert.equal(f.trading.snapshot().positions.length,0);
 });

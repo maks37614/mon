@@ -300,7 +300,7 @@ export class Trading {
           }
           this.syncPaperFeed();
           if (
-            s.autoEntries &&
+            this.settings().autoEntries &&
             tradingScheduleState(s.tradingSchedule).allowed &&
             !b.pending.length &&
             b.positions.length < s.maxPositions &&
@@ -311,7 +311,8 @@ export class Trading {
               .signals.filter(
                 (signal) =>
                   !b.used[signal.id] &&
-                  !b.positions.some((p) => p.symbol === signal.symbol),
+                  !b.positions.some((p) => p.symbol === signal.symbol) &&
+                  Date.now() - (b.lastEntries[signal.symbol] || 0) >= s.entryCooldownSeconds * 1000,
               )
               .sort((a, z) => z.confidence - a.confidence || z.candleAt-a.candleAt);
             if (!signals.length) return; // Do not consume an entry interval while the source is empty.
@@ -329,6 +330,8 @@ export class Trading {
               const signal = signals[(cursor + candidate) % signals.length];
               if (
                 this.book(s.mode).positions.length >= s.maxPositions ||
+                this.book(s.mode).pending.length > 0 ||
+                this.book(s.mode).positions.some(p => p.status !== "active") ||
                 !this.settings().autoEntries ||
                 !tradingScheduleState(this.settings().tradingSchedule).allowed
               )
