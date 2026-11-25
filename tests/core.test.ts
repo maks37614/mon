@@ -837,3 +837,12 @@ test("empty auto-entry cycles do not consume the interval before a signal arrive
  await f.trading.monitor();assert.equal(f.store.get<any>("book:paper",{lastEntryAt:0}).lastEntryAt,0);
  f.store.set("signals",[signal()]);await f.trading.monitor();assert.equal(f.trading.snapshot().positions.length,1);
 });
+
+test("manual order confirmation is checked inside the trading queue",async t=>{
+ const f=fixture(t,"paper");await assert.rejects(f.trading.enter("signal-1","live",true),/режим змінився/);
+ assert.equal(f.trading.snapshot().positions.length,0);
+ await f.trading.enter("signal-1","paper",false);const p=f.trading.snapshot().positions[0];
+ await assert.rejects(f.trading.closePosition(p.id,"live",true),/режим змінився/);
+ assert.equal(f.trading.snapshot().positions.length,1);
+ await f.trading.closePosition(p.id,"paper",false);assert.equal(f.trading.snapshot().positions.length,0);
+});

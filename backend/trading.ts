@@ -366,8 +366,11 @@ export class Trading {
         this.monitoring = false;
       });
   }
-  enter(signalId: string) {
+  enter(signalId: string, expectedMode?: Mode, liveAcknowledged = false) {
     return this.mutex.run(async () => {
+      const mode=this.settings().mode;
+      if (expectedMode !== undefined && (mode !== expectedMode || (mode==="live" && !liveAcknowledged)))
+        throw new Error("Торговий режим змінився або реальний ордер не підтверджено; повторіть запит");
       const signal = (this.sources ? this.sources.signals(this.settings()) : this.store.get<Signal[]>("signals", []))
         .find((x) => x.id === signalId);
       if (!signal) throw new Error("Сигнал відсутній або вже застарів");
@@ -646,8 +649,11 @@ export class Trading {
       await this.closeLive(b, p, "PROTECTION_FAILED", s);
     }
   }
-  closePosition(id: string) {
+  closePosition(id: string, expectedMode?: Mode, liveAcknowledged = false) {
     return this.mutex.run(async () => {
+      const mode=this.settings().mode;
+      if (expectedMode !== undefined && (mode !== expectedMode || (mode==="live" && !liveAcknowledged)))
+        throw new Error("Торговий режим змінився або реальне закриття не підтверджено; повторіть запит");
       const s = this.settings(),
         b = this.book(s.mode),
         p = b.positions.find((x) => x.id === id);

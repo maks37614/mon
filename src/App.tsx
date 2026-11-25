@@ -367,6 +367,7 @@ function SettingsPanel({
 }) {
   const [form, setForm] = useState<Settings>({ ...data.settings }),
     [ack, setAck] = useState(false);
+  const baseline = useRef<Settings>(structuredClone(data.settings));
   const [currentPassword, setCurrentPassword] = useState(""),
     [newPassword, setNewPassword] = useState("");
   const toggle = (key: "timeframes" | "formationTypes", item: string) =>
@@ -382,15 +383,16 @@ function SettingsPanel({
         className="panel"
         onSubmit={(e) => {
           e.preventDefault();
-          void run(
-            () =>
-              api(
-                "/api/settings",
-                { settings: form, liveAcknowledged: ack },
-                "PUT",
-              ),
-            "Налаштування збережено",
-          );
+          // Send only intentional edits, not stale values from the entire form.
+          const patch=Object.fromEntries(Object.keys(form).filter(key=>
+            JSON.stringify(form[key as keyof Settings])!==JSON.stringify(baseline.current[key as keyof Settings])
+          ).map(key=>[key,form[key as keyof Settings]]));
+          void run(async()=>{
+            const saved=await api<Settings>("/api/settings",{settings:patch,liveAcknowledged:ack},"PUT");
+            baseline.current=structuredClone(saved);
+            setForm(saved);
+            setAck(false);
+          },"Налаштування збережено");
         }}
       >
         <div className="section-heading">
@@ -700,6 +702,7 @@ export default function App() {
     [query, setQuery] = useState(""),
     [chart, setChart] = useState<ChartSelection | null>(null);
   const refreshSequence = useRef(0);
+  const actionInFlight=useRef(false);
   const refresh = useCallback(async () => {
     const sequence = ++refreshSequence.current;
     try {
@@ -752,7 +755,8 @@ export default function App() {
     };
   }, [chart]);
   async function run(fn: () => Promise<any>, success = "") {
-    if (busy) return false;
+    if (actionInFlight.current) return false;
+    actionInFlight.current=true;
     setBusy(true);
     setError("");
     setMessage("");
@@ -765,6 +769,7 @@ export default function App() {
       setError(e.message);
       return false;
     } finally {
+      actionInFlight.current=false;
       setBusy(false);
     }
   }
@@ -861,7 +866,10 @@ export default function App() {
             onClick={() =>
               run(async () => {
                 await api("/api/auth/logout", {});
+                refreshSequence.current++;
                 setAuthenticated(false);
+                setData(null);
+                setChart(null);
                 setCsrf("");
               })
             }
@@ -1460,7 +1468,7 @@ export default function App() {
                               <button
                                 disabled={busy || ("canEnter" in signal && signal.canEnter === false)}
                                 title={"canEnter" in signal && signal.canEnter === false
-                                  ? "Формація видима для аналізу, але максимальний вік нового входу вже минув"
+                                  ? "Формація видима для аналізу, але не пройшла умови допуску до входу"
                                   : undefined}
                                 onClick={() => {
                                   if (
@@ -1470,7 +1478,7 @@ export default function App() {
                                   )
                                     void run(
                                       () =>
-                                        api(`/api/signals/${signal.id}/enter`, {
+                                        api(`/api/signals/${encodeURIComponent(signal.id)}/enter`, {
                                           liveAcknowledged: live,
                                         }),
                                       "Запит входу опрацьовано",
@@ -1478,7 +1486,7 @@ export default function App() {
                                 }}
                               >
                                 {"canEnter" in signal && signal.canEnter === false
-                                  ? "Вік входу вичерпано"
+                                  ? "Вхід заблоковано"
                                   : live ? "Реальний вхід" : "Тестовий вхід"}
                               </button>
                             </td>

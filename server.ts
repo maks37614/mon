@@ -202,7 +202,7 @@ export function createApplication(options: Options) {
         req.body.liveAcknowledged !== true
       )
         throw new Error("Підтвердьте реальний ордер");
-      await trading.enter(String(req.params.id));
+      await trading.enter(String(req.params.id), trading.settings().mode, req.body?.liveAcknowledged === true);
       res.json({ ok: true });
     }),
   );
@@ -214,7 +214,7 @@ export function createApplication(options: Options) {
         req.body.liveAcknowledged !== true
       )
         throw new Error("Підтвердьте реальне закриття");
-      await trading.closePosition(String(req.params.id));
+      await trading.closePosition(String(req.params.id), trading.settings().mode, req.body?.liveAcknowledged === true);
       res.json({ ok: true });
     }),
   );
