@@ -902,3 +902,16 @@ test("loss of an active Binance protection pauses new entries without inventing 
   assert.equal(f.broker.submitted.length,1);
   await assert.rejects(f.trading.enter("signal-1"),/узгодити/);
 });
+
+test("pause requested during an automatic quote read prevents order submission",async t=>{
+  const f=fixture(t,"paper");
+  await f.trading.updateSettings({autoEntries:true});
+  let started!:()=>void,release!:()=>void;
+  const ready=new Promise<void>(r=>{started=r;});
+  f.market.getPrices=async()=>{started();await new Promise<void>(r=>{release=r;});return {at:Date.now(),data:{BTCUSDT:100}};};
+  const cycle=f.trading.monitor();await ready;
+  const pause=f.trading.updateSettings({autoEntries:false});
+  release();await cycle;await pause;
+  assert.equal(f.trading.snapshot().positions.length,0);
+  assert.equal(f.trading.settings().autoEntries,false);
+});

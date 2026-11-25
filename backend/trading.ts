@@ -87,6 +87,8 @@ export class Trading {
     while(this.autoDecisions.size>300) this.autoDecisions.delete(this.autoDecisions.keys().next().value!);
   }
   private monitoring = false;
+  private entryPauseRequested=false;
+  private pauseEpoch=0;
   private running = false;
   private lastLiveCycle = 0;
   private paperGaps = new Set<string>();
@@ -134,10 +136,16 @@ export class Trading {
       (p.protectionCheck?.status==="verified" && Date.now()-p.protectionCheck.at<90_000));
   }
   private pause(message: string) {
+    this.entryPauseRequested=true;
+    this.pauseEpoch++;
     this.store.set("settings", { ...this.settings(), autoEntries: false });
     this.store.log("ERROR", message);
   }
   updateSettings(input: unknown) {
+    const requested=input && typeof input==="object" && !Array.isArray(input)?input as Partial<Settings>:null;
+    // An explicit pause latches immediately, before waiting for network work in the trading queue.
+    if(requested?.autoEntries===false) { this.entryPauseRequested=true; this.pauseEpoch++; }
+    const epoch=this.pauseEpoch;
     return this.mutex.run(async () => {
       const previous = this.settings(),
         next = validateSettings(input, previous);
@@ -165,7 +173,10 @@ export class Trading {
         this.sources.invalidate();
         this.store.set("signals", []);
       }
+      if(this.entryPauseRequested && (requested?.autoEntries!==true || epoch!==this.pauseEpoch))
+        next.autoEntries=false;
       this.store.set("settings", next);
+      if(requested?.autoEntries===true && next.autoEntries && epoch===this.pauseEpoch) this.entryPauseRequested=false;
       return next;
     });
   }
@@ -213,7 +224,7 @@ export class Trading {
     const now = Date.now();
     const formations = (this.sources ? this.sources.signals(s) : this.store.get<Signal[]>("signals", []))
       .filter((signal) => formationIsVisible(signal, s, now));
-    const autoBlockReason=!s.autoEntries?"Автоматичні входи вимкнено"
+    const autoBlockReason=this.entryPauseRequested || !s.autoEntries?"Автоматичні входи вимкнено або запитано паузу"
       :!tradingScheduleState(s.tradingSchedule,now).allowed?"Поза торговим розкладом"
       :s.mode==="live" && (!this.liveAllowed || !this.vault.status(s.exchange).verified)?"Реальний режим або API не дозволено"
       :b.pending.length?"Очікування узгодження ордерів"
@@ -331,7 +342,7 @@ export class Trading {
           }
           this.syncPaperFeed();
           if (
-            this.settings().autoEntries &&
+            !this.entryPauseRequested && this.settings().autoEntries &&
             tradingScheduleState(s.tradingSchedule).allowed &&
             !b.pending.length &&
             b.positions.length < s.maxPositions &&
@@ -358,13 +369,15 @@ export class Trading {
             b.candidateCursor =
               (cursor + maxAttempts) % Math.max(1, signals.length);
             this.save(s.mode, b);
+            const cycleStarted=Date.now();
             for (let candidate = 0; candidate < maxAttempts; candidate++) {
               const signal = signals[(cursor + candidate) % signals.length];
               if (
                 this.book(s.mode).positions.length >= s.maxPositions ||
                 this.book(s.mode).pending.length > 0 ||
                 this.book(s.mode).positions.some(p => p.status !== "active") ||
-                !this.settings().autoEntries ||
+                this.entryPauseRequested || !this.settings().autoEntries ||
+                Date.now()-cycleStarted>=8000 ||
                 !tradingScheduleState(this.settings().tradingSchedule).allowed
               )
                 break;
@@ -421,7 +434,7 @@ export class Trading {
       b = this.book(s.mode),
       now = Date.now();
     if (this.sources && !this.sources.allowsEntry(signal, s)) throw new Error("Монета відсутня у свіжому дозволеному джерелі h00k.top");
-    if (automatic && (!s.autoEntries || !tradingScheduleState(s.tradingSchedule, now).allowed))
+    if (automatic && (this.entryPauseRequested || !s.autoEntries || !tradingScheduleState(s.tradingSchedule, now).allowed))
       throw new Error("Автоматичні входи призупинено або зараз поза торговим розкладом");
     if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !(signal.source === "hook_regular" ? Number.isFinite(signal.confidence) : Number.isInteger(signal.confidence)) ||
       signal.confidence < 0 || signal.confidence > 100)
@@ -549,8 +562,8 @@ export class Trading {
     }
     // Quotes, account reads and exchange preparation may span the session boundary.
     if (Date.now() - signal.candleAt > s.maxSignalAgeSeconds * 1000) throw new Error("Сигнал застарів під час підготовки виконання");
-    if (automatic && !tradingScheduleState(s.tradingSchedule).allowed)
-      throw new Error("Торгова сесія завершилася під час підготовки входу");
+    if (automatic && (this.entryPauseRequested || !this.settings().autoEntries || !tradingScheduleState(s.tradingSchedule).allowed))
+      throw new Error("Автоматичний вхід призупинено або торгова сесія завершилася під час підготовки");
     if (this.sources && !this.sources.allowsEntry(signal, this.settings())) throw new Error("Формація h00k більше не актуальна; вхід скасовано");
     const intent: Intent = {
       id: orderId(),

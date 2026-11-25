@@ -1102,7 +1102,7 @@ export default function App() {
                   </div>
                   {scan.sourceCoverage ? <div className="coverage-values">
                     <span><strong>{data.formations?.length ?? 0}</strong> формацій після фільтрів</span>
-                    <span><strong>{data.signals.length}</strong> дозволених сигналів</span>
+                    <span><strong>{data.signals.length}</strong> сигналів, допущених джерелом</span>
                     <span><strong>{scan.sourceCounts?.regular ?? 0}</strong> монет зі звичайними формаціями</span>
                   </div> : <><div className="coverage-values">
                     <span>
