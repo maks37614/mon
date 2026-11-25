@@ -113,7 +113,7 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
     paperLatencyMs: [0, 5000, true],
   };
   for (const [k, [min, max, integer]] of Object.entries(ranges)) {
-    const n = raw[k] ?? s[k as keyof Settings];
+    const n = s[k as keyof Settings];
     if (
       typeof n !== "number" ||
       !Number.isFinite(n) ||

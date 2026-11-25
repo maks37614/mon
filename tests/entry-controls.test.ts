@@ -302,3 +302,8 @@ test("confirmed-only execution follows h00k validation, not merely the coin or b
     await guarded.enter(signal.id);assert.equal(guarded.snapshot().positions.length,1);assert.equal(f.broker.submitted.length,mode==="live"?1:0);
   }
 });
+
+test("numeric settings reject null instead of persisting an invalid risk value", async t=>{
+  const f=fixture(t);await assert.rejects(f.trading.updateSettings({orderNotionalUsdt:null}),/Параметр/);
+  assert.equal(f.trading.settings().orderNotionalUsdt,DEFAULT_SETTINGS.orderNotionalUsdt);
+});

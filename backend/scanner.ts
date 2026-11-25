@@ -60,9 +60,11 @@ export class Scanner {
       const signals = this.sources.signals(latest);
       this.store.set("signals", signals);
       const count = new Set(signals.map(s=>s.symbol)).size;
+      const sourceErrors = this.sources.diagnostics();
       this.saveStatus({...old, signature, cursor:0, total:signals.length, symbols:count,
         processed:signals.length, successful:signals.length, detected:signals.length,
         running:false, finishedAt:Date.now(), visibleFormations:signals.length,
+        failed:Object.keys(sourceErrors).length,
         entrySignals:signals.filter(s=>this.sources!.allowsEntry(s,latest)).length, sourceErrors:this.sources.diagnostics()});
       return;
     }

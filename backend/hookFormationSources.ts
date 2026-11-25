@@ -6,7 +6,7 @@ const MAX_AGE = 120_000;
 const REFRESH_MS = 45_000;
 type Source = "regular" | "early";
 type Key = { exchange: Exchange; symbol: string; timeframe: string };
-type Row = { symbol: string; until: number; signal: Signal };
+type Row = { symbol: string; until: number; signal: Signal; blocked: boolean };
 type Snapshot = { rows: Map<string, Row>; checkedAt: number };
 const TYPES: Record<string,string> = {
   double_top:"Double Top", double_bottom:"Double Bottom", asc_triangle:"Ascending Triangle",
@@ -78,10 +78,25 @@ export function readHookCandidates(data: unknown, exchange: Exchange, timeframe:
         status: confirmed ? "confirmed" : "watching", candleAt:decisionAt, detectedAt,
         description: String(early ? pattern.explanation ?? "" : pattern.description ?? "").slice(0,1000),
       };
-      rows.push({symbol:coin.symbol,signal,until:Math.min(coin.lastUpdated+MAX_AGE,proof.collectedAt+MAX_AGE,proof.lastClosedAt+interval+90_000)});
+      // Turning off confirmed-only is not permission to revive invalidated plans.
+      const plan = v?.regularPlan;
+      const invalidated = Array.isArray(plan?.afterEntry) && plan.afterEntry.some((bar: unknown) =>
+        !Array.isArray(bar) || bar.length !== 2 || !positive(bar[0]) || !positive(bar[1]) || bar[0] < bar[1] ||
+        (direction === "LONG" ? bar[1] <= stopLoss || bar[0] >= takeProfit : bar[0] >= stopLoss || bar[1] <= takeProfit));
+      const blocked = early || invalidated || plan?.entryExpired === true ||
+        (v?.breakoutConfirmed === true && plan?.structureActive === false) ||
+        v?.entryMode === "WAIT_RETEST" || v?.confluence?.flow?.entryBlockedByFlow === true ||
+        !isInsideHookPlan(signal,coin.currentPrice);
+      rows.push({symbol:coin.symbol,signal,blocked,until:Math.min(coin.lastUpdated+MAX_AGE,proof.collectedAt+MAX_AGE,proof.lastClosedAt+interval+90_000)});
     }
   }
   return rows;
+}
+
+export function isInsideHookPlan(signal: Signal, price: number) {
+  return positive(price) && (signal.direction === "LONG"
+    ? price > signal.stopLoss && price < signal.takeProfit
+    : price < signal.stopLoss && price > signal.takeProfit);
 }
 
 export class HookFormationSources {
@@ -89,11 +104,13 @@ export class HookFormationSources {
   private jobs = new Map<string, Promise<void>>();
   private errors = new Map<string, string>();
   private generation = 0;
+  private retryAt = new Map<string, number>();
   invalidate() {
     this.generation++;
     this.snapshots.clear();
     this.jobs.clear();
     this.errors.clear();
+    this.retryAt.clear();
   }
   constructor(private fetcher: typeof fetch = fetch, private now: () => number = Date.now) {}
   private async request(path: string, init: RequestInit = {}) {
@@ -109,6 +126,7 @@ export class HookFormationSources {
     const key = scope(exchange, timeframe, source);
     const existing = this.jobs.get(key);
     if (existing) return existing;
+    if (this.now() < (this.retryAt.get(key) ?? 0)) return Promise.resolve();
     const cached = this.snapshots.get(key);
     if (cached && this.now() - cached.checkedAt < REFRESH_MS) return Promise.resolve();
     const generation = this.generation;
@@ -133,10 +151,12 @@ export class HookFormationSources {
         const now = this.now();
         this.snapshots.set(key, {rows:new Map(readHookCandidates(data,exchange,timeframe,source,now).map(r=>[r.signal.id,r])),checkedAt:now});
         this.errors.delete(key);
+        this.retryAt.delete(key);
       } catch (error) {
         // Never keep a last-good allowlist after a failed refresh.
         if (generation !== this.generation) return;
         this.snapshots.delete(key);
+        this.retryAt.set(key,this.now()+15_000);
         this.errors.set(key, error instanceof Error ? error.message : "Джерело недоступне");
       }
     })().finally(()=>{ if (generation === this.generation) this.jobs.delete(key); });
@@ -172,7 +192,7 @@ export class HookFormationSources {
   allowsEntry(signal: Signal, settings: Settings) {
     // Early candidates have no confirmed entry or calibrated score on h00k. Never manufacture either.
     if (signal.source !== "hook_regular" || !signalAllowsEntry(signal,settings,this.now())) return false;
-    return this.activeRows(settings,"regular").some(row=>sameSignal(signal,row.signal));
+    return this.activeRows(settings,"regular").some(row=>!row.blocked && sameSignal(signal,row.signal));
   }
   diagnostics() { return Object.fromEntries(this.errors); }
   counts(settings: Settings) {

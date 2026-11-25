@@ -47,3 +47,12 @@ test("invalidated request cannot restore authorization",async()=>{
   const source=new HookFormationSources((()=>new Promise<Response>(r=>{resolve=r;})) as typeof fetch,()=>now);
   const pending=source.refresh(settings);source.invalidate();resolve(Response.json({success:true,data:[coin]}));await pending;assert.equal(source.allows(key,settings),false);
 });
+
+test("disabling confirmation never revives a stopped, expired or flow-blocked plan",async()=>{
+  for(const extra of [{regularPlan:{...validation.regularPlan,afterEntry:[[101,98]]}},{regularPlan:{...validation.regularPlan,entryExpired:true}},{regularPlan:{...validation.regularPlan,structureActive:false}},{entryMode:"WAIT_RETEST"},{confluence:{total:87.5,flow:{entryBlockedByFlow:true}}}]){
+    const data=[{...coin,formations:[{...pattern,validation:{...validation,...extra,passed:false}}]}];
+    const source=new HookFormationSources((async()=>Response.json({success:true,data})) as typeof fetch,()=>now);
+    const s={...settings,confirmedOnly:false};await source.refresh(s);
+    assert.ok(source.signals(s)[0]);assert.equal(source.allowsEntry(source.signals(s)[0],s),false);
+  }
+});

@@ -11,7 +11,7 @@ import {
 } from "./config";
 import { Mutex, type Store } from "./store";
 import { formationIsVisible, signalAllowsEntry } from "./formationState";
-import type { HookFormationSources } from "./hookFormationSources";
+import { isInsideHookPlan, type HookFormationSources } from "./hookFormationSources";
 import { tradingScheduleState } from "./tradingSchedule";
 import type { MarketData } from "./market";
 import type { Vault } from "./security";
@@ -77,6 +77,7 @@ const sameQuantity = (a: number, b: number) =>
 export class Trading {
   private mutex = new Mutex();
   private timer: ReturnType<typeof setInterval> | null = null;
+  private rejectedEntries = new Map<string, number>();
   private monitoring = false;
   private running = false;
   private lastLiveCycle = 0;
@@ -307,8 +308,18 @@ export class Trading {
                 break;
               try {
                 await this.enterLocked(signal, true);
-              } catch {
-                /* A rejected signal is retried only after the next configured entry interval. */
+              } catch (error) {
+                const reason = error instanceof Error ? error.message.slice(0,180) : "Вхід відхилено";
+                const key = signal.exchange + ":" + signal.symbol + ":" + reason;
+                const at = Date.now();
+                if (at - (this.rejectedEntries.get(key) || 0) >= 60_000) {
+                  this.rejectedEntries.set(key, at);
+                  this.store.log("WARN", signal.symbol + ": автоматичний вхід пропущено — " + reason);
+                }
+                if (this.rejectedEntries.size > 500) {
+                  for (const [k, time] of this.rejectedEntries) if (at-time>=60_000) this.rejectedEntries.delete(k);
+                  while (this.rejectedEntries.size>500) this.rejectedEntries.delete(this.rejectedEntries.keys().next().value!);
+                }
               }
             }
           }
@@ -371,13 +382,14 @@ export class Trading {
       throw new Error("Триває пауза повторного входу для цієї монети");
     const quotes = await this.market.getPrices(s.exchange),
       price = quotes.data[signal.symbol];
-    if (!price || Date.now() - quotes.at > 15_000)
+    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(quotes.at) || Date.now() - quotes.at > 15_000 || quotes.at > Date.now()+2000)
       throw new Error("Немає свіжої ринкової ціни");
     if (
       (Math.abs(price - signal.entryPrice) / signal.entryPrice) * 100 >
       s.slippageTolerancePercent
     )
       throw new Error("Ціна відійшла від точки входу більше дозволеного");
+    if (this.sources && !isInsideHookPlan(signal,price)) throw new Error("Ціна вже за межами торгового плану h00k");
     const direction = s.reverseEnabled
       ? signal.direction === "LONG"
         ? "SHORT"
@@ -410,6 +422,7 @@ export class Trading {
       }
       if (Math.abs(executionPrice - signal.entryPrice) / signal.entryPrice * 100 > s.slippageTolerancePercent)
         throw new Error("Ціна виконання зі стакана перевищує допустиме відхилення");
+      if (this.sources && !isInsideHookPlan(signal,executionPrice)) throw new Error("Ціна виконання вже за межами торгового плану h00k");
       const tier = paper.tiers.find(t => quantity * executionPrice <= t.cap);
       if (!tier || s.leverage > tier.maxLeverage || quantity * executionPrice > s.orderNotionalUsdt * 1.000001 ||
         (market.maxQuantity && quantity > market.maxQuantity)) throw new Error("Обсяг або плече перевищують біржовий ліміт");
@@ -455,6 +468,12 @@ export class Trading {
         s.orderNotionalUsdt,
       );
       await this.gateway.prepare(s.exchange, signal.symbol, s.leverage);
+      if (this.sources) {
+        const latest = await this.market.getPrices(s.exchange), nextPrice = latest.data[signal.symbol];
+        if (!Number.isFinite(latest.at) || Date.now()-latest.at>15_000 || latest.at>Date.now()+2000 ||
+          !isInsideHookPlan(signal,nextPrice) || Math.abs(nextPrice-signal.entryPrice)/signal.entryPrice*100>s.slippageTolerancePercent)
+          throw new Error("Ціна змінилася під час підготовки ордера; вхід скасовано");
+      }
     }
     // Quotes, account reads and exchange preparation may span the session boundary.
     if (Date.now() - signal.candleAt > s.maxSignalAgeSeconds * 1000) throw new Error("Сигнал застарів під час підготовки виконання");

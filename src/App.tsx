@@ -528,16 +528,15 @@ function SettingsPanel({
           ))}
         </div>
         <div className="divider" />
-        <h2>Сканування всіх монет</h2>
+        <h2>Формації h00k.top</h2>
         <p className="muted">
-          Усі активні USDT perpetual контракти вибраної біржі. Черга
-          обробляється пакетами; нові монети додаються автоматично. Додавання
-          таймфреймів збільшує час повного проходу.
+          Монети, типи та підтвердження отримуються з h00k.top. Власне сканування біржі не використовується.
+          Кількість кандидатів залежить від покриття джерела та обраних фільтрів.
         </p>
         <fieldset>
           <legend>Таймфрейми</legend>
           <div className="check-row">
-            {TIMEFRAMES.map((tf) => (
+            {TIMEFRAMES.filter(tf => tf !== "30m" || form.timeframes.includes(tf)).map((tf) => (
               <label className="check" key={tf}>
                 <input
                   type="checkbox"
@@ -550,7 +549,7 @@ function SettingsPanel({
           </div>
         </fieldset>
         <div className="form-grid">
-          {scannerFields.map((f) => (
+          {scannerFields.filter(f => f.key === "minScore" || f.key === "scanIntervalSeconds").map((f) => (
             <label key={f.key}>
               {f.label}
               <input
@@ -572,7 +571,7 @@ function SettingsPanel({
           ))}
         </div>
         <fieldset>
-          <legend>Типи формацій · {FORMATIONS.length} детекторів</legend>
+          <legend>Типи формацій · фільтри h00k.top</legend>
           <div className="pattern-options">
             {FORMATIONS.map((name) => (
               <label className="check" key={name}>
