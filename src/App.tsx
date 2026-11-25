@@ -486,13 +486,13 @@ function SettingsPanel({
                 setForm({ ...form, confirmedOnly: e.target.checked })
               }
             />
-            Лише підтверджені формації
+            Лише підтверджені формації h00k.top
           </label>
         </div>
         <div className="notice">Джерела монет: тільки формації h00k.top (USDT-ф’ючерси). 30m не підтримується джерелом і не дає сигналів.</div>
         <div className="check-row">
           <label className="check"><input type="checkbox" checked={form.hookRegularFormations} onChange={e=>setForm({...form,hookRegularFormations:e.target.checked})}/> Звичайні формації</label>
-          <label className="check"><input type="checkbox" checked={form.hookEarlyFormations} onChange={e=>setForm({...form,hookEarlyFormations:e.target.checked})}/> Ранні формації (лише підтверджений вхід)</label>
+          <label className="check"><input type="checkbox" checked={form.hookEarlyFormations} onChange={e=>setForm({...form,hookEarlyFormations:e.target.checked})}/> Ранні формації (спостереження, без входу до підтвердження сайтом)</label>
         </div>
         <TradingScheduleSettings value={form.tradingSchedule}
           onChange={tradingSchedule => setForm({ ...form, tradingSchedule })} />
@@ -1423,7 +1423,7 @@ export default function App() {
                             <td>{price(signal.entryPrice)}</td>
                             <td>
                               <details className="score-details">
-                                <summary aria-label={`Оцінка ${signal.symbol} ${signal.timeframe}: ${signal.confidence} зі 100`}>{signal.confidence}/100</summary>
+                                <summary aria-label={`Оцінка ${signal.symbol} ${signal.timeframe}: ${signal.confidence} зі 100`}>{signal.source === "hook_early" ? "Без оцінки" : `${signal.confidence}/100`}</summary>
                                 {signal.scoreParts ? <div>
                                   <span>Структура: {signal.scoreParts.structure}/60</span>
                                   <span>Пробій: {signal.scoreParts.breakout}/25</span>

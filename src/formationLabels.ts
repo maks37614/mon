@@ -10,4 +10,10 @@ export const FORMATION_LABELS_UK: Readonly<Record<string, string>> = {
   "Falling Wedge": "Низхідний клин",
   "Bull Flag": "Бичачий прапор",
   "Bear Flag": "Ведмежий прапор",
+  "Hammer / Bullish Pinbar": "Молот / бичачий пінбар",
+  "Shooting Star": "Падаюча зірка",
+  "Bullish Engulfing": "Бичаче поглинання",
+  "Bearish Engulfing": "Ведмеже поглинання",
+  "Level Breakout": "Пробій / ретест рівня",
+  "Volatility Squeeze": "Стиснення волатильності",
 };

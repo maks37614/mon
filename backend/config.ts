@@ -14,6 +14,12 @@ export const FORMATIONS = [
   "Falling Wedge",
   "Bull Flag",
   "Bear Flag",
+  "Hammer / Bullish Pinbar",
+  "Shooting Star",
+  "Bullish Engulfing",
+  "Bearish Engulfing",
+  "Level Breakout",
+  "Volatility Squeeze",
 ];
 export type Exchange = "binance" | "bybit";
 export type Mode = "paper" | "live";
@@ -155,6 +161,9 @@ export type Signal = {
   takeProfit: number;
   confidence: number;
   analysisVersion?: number;
+  source?: "hook_regular" | "hook_early";
+  sourceFormationId?: string;
+  sourceStatus?: string;
   scoreParts?: { structure: number; breakout: number; volume: number };
   status: "confirmed" | "watching";
   candleAt: number;

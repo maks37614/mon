@@ -176,8 +176,8 @@ export class Trading {
     const history = b.history,
       wins = history.filter((t) => t.netPnl > 0).length;
     const now = Date.now();
-    const formations = this.store.get<Signal[]>("signals", [])
-      .filter((signal) => formationIsVisible(signal, s, now) && (!this.sources || this.sources.allows(signal, s)));
+    const formations = (this.sources ? this.sources.signals(s) : this.store.get<Signal[]>("signals", []))
+      .filter((signal) => formationIsVisible(signal, s, now));
     return {
       settings: s,
       entrySchedule: tradingScheduleState(s.tradingSchedule, now),
@@ -327,8 +327,7 @@ export class Trading {
   }
   enter(signalId: string) {
     return this.mutex.run(async () => {
-      const signal = this.store
-        .get<Signal[]>("signals", [])
+      const signal = (this.sources ? this.sources.signals(this.settings()) : this.store.get<Signal[]>("signals", []))
         .find((x) => x.id === signalId);
       if (!signal) throw new Error("Сигнал відсутній або вже застарів");
       await this.enterLocked(signal, false);
@@ -341,7 +340,7 @@ export class Trading {
     if (this.sources && !this.sources.allowsEntry(signal, s)) throw new Error("Монета відсутня у свіжому дозволеному джерелі h00k.top");
     if (automatic && (!s.autoEntries || !tradingScheduleState(s.tradingSchedule, now).allowed))
       throw new Error("Автоматичні входи призупинено або зараз поза торговим розкладом");
-    if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !Number.isInteger(signal.confidence) ||
+    if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !(signal.source === "hook_regular" ? Number.isFinite(signal.confidence) : Number.isInteger(signal.confidence)) ||
       signal.confidence < 0 || signal.confidence > 100)
       throw new Error("Сигнал потребує нового сканування та оцінювання");
     if (
