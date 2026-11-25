@@ -936,3 +936,24 @@ test("late fee reconciliation matches original entry and exact exit fills withou
  const final=f.trading.snapshot().history[0];assert.equal(final.feesComplete,true);assert.ok(Math.abs(final.fee-.028)<1e-9);
  assert.equal(f.trading.snapshot().stats.balance,balance);assert.equal(f.broker.submitted.length,orders);
 });
+
+
+test("malformed live entry fill is retained for reconciliation and never adopted",async t=>{
+ const f=fixture(t,"live"),submit=f.broker.submit;
+ f.broker.submit=async(intent:any)=>{const fill=await submit(intent);return {...fill,filled:intent.quantity*2};};
+ await assert.rejects(f.trading.enter("signal-1"));
+ const state=f.trading.snapshot();
+ assert.equal(state.positions.length,0);assert.equal(state.pending.length,1);
+ assert.equal(state.settings.autoEntries,false);assert.equal(f.broker.submitted.length,1);
+});
+test("one failed pending-order read does not interrupt reconciliation of other orders",async t=>{
+ const f=fixture(t,"live");
+ const b=f.store.get<any>("book:live",null)??{balance:1000,startBalance:1000,positions:[],history:[],pending:[],used:{},lastEntries:{},lastEntryAt:0};
+ const base={kind:"entry",exchange:"binance",symbol:"BTCUSDT",createdAt:Date.now(),quantity:.25,direction:"LONG",signal:signal(),stopLoss:99,takeProfit:102};
+ b.pending=[{...base,id:"offline"},{...base,id:"canceled"}];f.store.set("book:live",b);
+ const reads:string[]=[];f.broker.read=async(intent:any)=>{reads.push(intent.id);if(intent.id==="offline")throw Error("offline");return {id:"cancel",status:"canceled",filled:0,average:0,fee:0}};
+ await f.trading.monitor();
+ assert.deepEqual(reads,["offline","canceled"]);
+ assert.deepEqual(f.trading.snapshot().pending.map(x=>x.id),["offline"]);
+ assert.equal(f.broker.submitted.length,0);
+});
