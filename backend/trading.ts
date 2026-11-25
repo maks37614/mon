@@ -45,6 +45,7 @@ export type Position = {
   closeReason?: string;
   intent: Intent;
   guards: string[];
+  protectionCheck?: { at:number; status:"verified"|"missing"|"unknown" };
   status: "active" | "protecting" | "closing" | "reconciling";
   unrealizedPnl: number;
   paper?: PaperState;
@@ -127,6 +128,10 @@ export class Trading {
   hasLiveExposure() {
     const b = this.book("live");
     return !!(b.positions.length || b.pending.length);
+  }
+  private protectionReady(b:Book,mode:Mode) {
+    return mode!=="live" || b.positions.every(p=>p.status!=="active" ||
+      (p.protectionCheck?.status==="verified" && Date.now()-p.protectionCheck.at<90_000));
   }
   private pause(message: string) {
     this.store.set("settings", { ...this.settings(), autoEntries: false });
@@ -213,6 +218,7 @@ export class Trading {
       :s.mode==="live" && (!this.liveAllowed || !this.vault.status(s.exchange).verified)?"Реальний режим або API не дозволено"
       :b.pending.length?"Очікування узгодження ордерів"
       :b.positions.some(p=>p.status!=="active")?"Позиції потребують узгодження"
+      :!this.protectionReady(b,s.mode)?"Захист відкритої позиції потребує перевірки"
       :b.positions.length>=s.maxPositions?"Досягнуто ліміт позицій"
       :now-b.lastEntryAt<s.entryIntervalSeconds*1000?"Інтервал між циклами входу"
       :null;
@@ -253,6 +259,7 @@ export class Trading {
         if(b.positions.some(p=>p.symbol===signal.symbol)) reasons.push("Позиція по монеті вже відкрита");
         if(b.positions.length>=s.maxPositions) reasons.push("Досягнуто ліміт позицій");
         if(b.pending.length || b.positions.some(p=>p.status!=="active")) reasons.push("Очікування узгодження ордерів");
+        if(!this.protectionReady(b,s.mode)) reasons.push("Захист відкритої позиції не підтверджено");
         if(now-(b.lastEntries[signal.symbol]||0)<s.entryCooldownSeconds*1000) reasons.push("Пауза повторного входу");
         if(s.mode==="live" && (!this.liveAllowed || !this.vault.status(s.exchange).verified)) reasons.push("Реальний режим або API не дозволено");
         const last=this.autoDecisions.get(signal.id);
@@ -329,6 +336,7 @@ export class Trading {
             !b.pending.length &&
             b.positions.length < s.maxPositions &&
             b.positions.every(p=>p.status==="active") &&
+            this.protectionReady(b,s.mode) &&
             Date.now() - b.lastEntryAt >= s.entryIntervalSeconds * 1000
           ) {
             const signals = this.snapshot()
@@ -431,7 +439,7 @@ export class Trading {
       signal.candleAt > now + 2000
     )
       throw new Error("Сигнал застарів");
-    if (b.pending.length || b.positions.some((p) => p.status !== "active"))
+    if (b.pending.length || b.positions.some((p) => p.status !== "active") || !this.protectionReady(b,s.mode))
       throw new Error("Спочатку потрібно узгодити ордери або захисні рівні");
     if (
       b.positions.length >= s.maxPositions ||
@@ -668,6 +676,7 @@ export class Trading {
           throw new Error("Захисні рівні Bybit не підтверджені");
       }
       p.status = "active";
+      p.protectionCheck={at:Date.now(),status:"verified"};
       this.save("live", b);
       this.store.log(
         "TRADE",
@@ -1090,6 +1099,7 @@ export class Trading {
         this.save("live", b);
       }
     }
+    let protectionBudget=2;
     for (const p of [...b.positions]) {
       // Re-fetch after recovering an entry; the first snapshot may predate its execution.
       const fresh =
@@ -1131,13 +1141,31 @@ export class Trading {
       if (
         p.status === "closing" ||
         (p.expiresAt > 0 && Date.now() >= p.expiresAt)
-      )
+      ) {
         await this.closeLive(
           b,
           p,
           p.status === "closing" ? p.closeReason || "MANUAL" : "TIME",
           s,
         );
+        continue;
+      }
+      if(p.status==="active" && protectionBudget>0 && Date.now()-(p.protectionCheck?.at||0)>=30_000) {
+        protectionBudget--;
+        const previous=p.protectionCheck?.status;
+        let status:"verified"|"missing"|"unknown"="unknown";
+        try {
+          if(p.exchange==="bybit") {
+            if(venue.protectionReported===false || !Number.isFinite(venue.stopLoss) || !Number.isFinite(venue.takeProfit))
+              status="unknown";
+            else status=venue.stopLoss>0 && venue.takeProfit>0?"verified":"missing";
+          } else status=await this.gateway.checkProtection(p.intent,p.guards);
+        } catch { /* Transient network errors are explicitly unknown, never missing. */ }
+        p.protectionCheck={at:Date.now(),status};
+        this.save("live",b);
+        if(status!=="verified" && (previous!==status || this.settings().autoEntries))
+          this.pause(`${p.symbol}: ${status==="missing"?"TP/SL відсутній або завершився":"TP/SL не вдалося перевірити"}. Нові входи призупинено; перевірте позицію на біржі`);
+      }
     }
     this.save("live", b);
   }

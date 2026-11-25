@@ -1251,6 +1251,7 @@ export default function App() {
                               </td>}
                               <td>
                                 {p.expiresAt ? date(p.expiresAt) : "Вимкнено"}
+                                {live && <small className={p.protectionCheck?.status==="verified"?"positive-text":"negative-text"}>TP/SL: {p.protectionCheck?.status==="verified"?"перевірено":p.protectionCheck?.status==="missing"?"відсутній / завершений":"очікує перевірки"}{p.protectionCheck?.at ? ` · ${date(p.protectionCheck.at)}`:""}</small>}
                               </td>
                               <td>
                                 <button

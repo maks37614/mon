@@ -130,6 +130,7 @@ function fixture(t: any, mode: "paper" | "live" = "paper") {
       saved("sl-1", "stopLoss");
       saved("tp-1", "takeProfit");
     },
+    checkProtection: async () => "verified",
     cancelProtection: async () => {},
     closingTrades: async () => [
       {
@@ -885,4 +886,19 @@ test("a cooldown-only candidate does not consume the automatic entry interval",a
   await f.trading.monitor();
   assert.equal(f.store.get<any>("book:paper",{}).lastEntryAt,0);
   assert.equal(f.trading.snapshot().positions.length,0);
+});
+
+test("loss of an active Binance protection pauses new entries without inventing a close fill",async t=>{
+  const f=fixture(t,"live");
+  await f.trading.enter("signal-1");
+  await f.trading.updateSettings({autoEntries:true});
+  const b=f.store.get<any>("book:live",{});
+  b.positions[0].protectionCheck.at=Date.now()-31000;f.store.set("book:live",b);
+  f.broker.checkProtection=async()=>"missing";
+  await f.trading.monitor();
+  assert.equal(f.trading.settings().autoEntries,false);
+  assert.equal(f.trading.snapshot().positions[0].protectionCheck?.status,"missing");
+  assert.equal(f.trading.snapshot().history.length,0);
+  assert.equal(f.broker.submitted.length,1);
+  await assert.rejects(f.trading.enter("signal-1"),/узгодити/);
 });

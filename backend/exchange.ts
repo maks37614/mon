@@ -196,8 +196,10 @@ export class ExchangeGateway {
           direction: p.side === "long" ? "LONG" : "SHORT",
           entryPrice: Number(p.entryPrice),
           currentPrice: Number(p.markPrice || p.lastPrice || p.entryPrice),
-          stopLoss: Number(p.stopLossPrice || 0),
-          takeProfit: Number(p.takeProfitPrice || 0),
+          stopLoss: Number(p.info?.stopLoss ?? p.stopLossPrice ?? 0),
+          takeProfit: Number(p.info?.takeProfit ?? p.takeProfitPrice ?? 0),
+          protectionReported: (p.info?.stopLoss != null || p.stopLossPrice != null) &&
+            (p.info?.takeProfit != null || p.takeProfitPrice != null),
         })),
     };
   }
@@ -352,6 +354,27 @@ export class ExchangeGateway {
         throw new Error("Захисний ордер не підтверджено");
       onSaved(String(existing.id), type);
     }
+  }
+  /** Read only. A failed request is not evidence that a guard is missing. */
+  async checkProtection(intent: Intent, guardIds: string[]): Promise<"verified"|"missing"> {
+    if(intent.exchange!=="binance") throw new Error("Перевірка захисту потребує даних позиції Bybit");
+    const client=await this.client(intent.exchange),symbol=this.symbol(client,intent.symbol);
+    for(const suffix of ["sl","tp"]) {
+      let order:any;
+      try {
+        order=await client.fetchOrder(undefined,symbol,{clientOrderId:`${intent.id}-${suffix}`,trigger:true});
+      } catch(error:any) {
+        if(error?.name==="OrderNotFound") return "missing";
+        throw error;
+      }
+      if(!order || !order.id || (order.symbol && order.symbol!==symbol))
+        throw new Error("Неповна відповідь перевірки захисного ордера");
+      if(["closed","canceled","expired","rejected"].includes(order.status)) return "missing";
+      if(order.status!=="open") throw new Error("Невідомий статус захисного ордера");
+      if(guardIds.length && !guardIds.includes(String(order.id)))
+        throw new Error("Ідентифікатор захисного ордера не збігається");
+    }
+    return "verified";
   }
   async cancelProtection(
     exchange: Exchange,
