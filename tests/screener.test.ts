@@ -7,6 +7,7 @@ import { DEFAULT_SETTINGS, tfMs, type Candle, type Signal } from "../backend/con
 import { formationIsVisible, signalAllowsEntry } from "../backend/formationState";
 import { detectFormations } from "../backend/patterns";
 import { Scanner } from "../backend/scanner";
+import { HookFormationSources } from "../backend/hookFormationSources";
 import { Store } from "../backend/store";
 import { Trading } from "../backend/trading";
 import { Vault } from "../backend/security";
@@ -167,4 +168,15 @@ test("empty screener explains loading, API errors, missing cron, search, and gen
   assert.match(screenerEmptyState({}, DEFAULT_SETTINGS, "external", true, 4, now).title, /пошуком/);
   assert.match(screenerEmptyState({ lastStartedAt: now - 1000 }, DEFAULT_SETTINGS, "external", false, 0, now).detail, /75\/100/);
   assert.equal(scanIsOverdue({ running: true, lastStartedAt: now - 10 * 60_000 }, DEFAULT_SETTINGS, now), false);
+});
+
+test("source-restricted scanner never requests candles for an unlisted exchange symbol",async t=>{
+  const store=storage(t); store.set("settings",DEFAULT_SETTINGS);
+  const now=Date.now(); const coin={symbol:"BTCUSDT",exchange:"binance",marketType:"futures",timeframe:"1m",quoteAsset:"USDT",currentPrice:100,lastUpdated:now,formationData:{contiguous:true,collectedAt:now,lastClosedAt:Math.floor(now/60000)*60000},formations:[{id:"r",bias:"bullish",status:"breakout",validation:{enoughData:true,finiteData:true}}]};
+  const source=new HookFormationSources((async()=>Response.json({success:true,data:[coin]})) as typeof fetch);
+  const calls:string[]=[];
+  const market:any={getMarkets:async()=>[{symbol:"BTCUSDT"},{symbol:"ETHUSDT"}],getCandles:async (_:string,symbol:string)=>{calls.push(symbol);return doubleBottom("1m");},status:()=>({})};
+  const scanner=new Scanner(store,market,source); scanner.start(); await scanner.task;
+  assert.deepEqual(calls,["BTCUSDT"]);
+  assert.ok(store.get<Signal[]>("signals",[]).every(s=>s.symbol==="BTCUSDT"));
 });

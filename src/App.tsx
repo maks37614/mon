@@ -489,7 +489,7 @@ function SettingsPanel({
             Лише підтверджені формації
           </label>
         </div>
-        <div className="notice">Джерела монет: тільки формації h00k.top (USDT-ф’ючерси).</div>
+        <div className="notice">Джерела монет: тільки формації h00k.top (USDT-ф’ючерси). 30m не підтримується джерелом і не дає сигналів.</div>
         <div className="check-row">
           <label className="check"><input type="checkbox" checked={form.hookRegularFormations} onChange={e=>setForm({...form,hookRegularFormations:e.target.checked})}/> Звичайні формації</label>
           <label className="check"><input type="checkbox" checked={form.hookEarlyFormations} onChange={e=>setForm({...form,hookEarlyFormations:e.target.checked})}/> Ранні формації (лише підтверджений вхід)</label>
@@ -1132,7 +1132,9 @@ export default function App() {
                   {data.schedulerMode === "external" && (
                     <span className="muted">Виклик cron: {date(scan.lastCronAt)}</span>
                   )}
-                  {scan.error && (
+                  {scan.sourceCounts && <span>Джерела h00k: звичайні {scan.sourceCounts.regular}, ранні {scan.sourceCounts.early}</span>}
+            {scan.sourceErrors && Object.entries(scan.sourceErrors).map(([scope,error])=><span key={scope} className="negative-text">{scope}: {String(error)}</span>)}
+            {scan.error && (
                     <span className="negative-text">{scan.error}</span>
                   )}
                 </div>

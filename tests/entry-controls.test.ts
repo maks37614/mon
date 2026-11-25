@@ -6,6 +6,7 @@ import path from "node:path";
 import { Store } from "../backend/store";
 import { Vault } from "../backend/security";
 import { Trading } from "../backend/trading";
+import { HookFormationSources } from "../backend/hookFormationSources";
 import { ExchangeGateway } from "../backend/exchange";
 import { paperVenue } from "./paperFixture";
 import { detectFormations } from "../backend/patterns";
@@ -271,3 +272,17 @@ for (const onlyConfirmed of [false, true])
       assert.equal(result.directionScore, 0);
     }
   });
+
+test("source guard rejects stored signals through manual and automatic entry, in paper and live", async t=>{
+  for(const mode of ["paper","live"] as const){
+    const f=fixture(t,{mode});
+    const source=new HookFormationSources((async()=>Response.json({success:true,data:[]})) as typeof fetch);
+    const guarded=new Trading(f.store,f.market,f.vault,f.broker,true,source);
+    await source.refresh(guarded.settings());
+    assert.equal(guarded.snapshot().signals.length,0);
+    await assert.rejects(guarded.enter(f.signal.id),/відсутня/);
+    await guarded.monitor();
+    assert.equal(guarded.snapshot().positions.length,0);
+    assert.equal(f.broker.submitted.length,0);
+  }
+});

@@ -146,6 +146,10 @@ export class Trading {
         if (!this.vault.status(next.exchange).verified)
           throw new Error("Спочатку перевірте API-ключі вибраної біржі");
       }
+      if (this.sources && (next.exchange !== previous.exchange || next.hookRegularFormations !== previous.hookRegularFormations || next.hookEarlyFormations !== previous.hookEarlyFormations || next.timeframes.join(",") !== previous.timeframes.join(","))) {
+        this.sources.invalidate();
+        this.store.set("signals", []);
+      }
       this.store.set("settings", next);
       return next;
     });
@@ -205,7 +209,7 @@ export class Trading {
       formations: formations.map((signal) => ({
         ...signal, canEnter: signalAllowsEntry(signal, s, now) && (!this.sources || this.sources.allowsEntry(signal, s)),
       })),
-      scanner: this.store.get<any>("scanner", {}),
+      scanner: { ...this.store.get<any>("scanner", {}), ...(this.sources ? { sourceErrors: this.sources.diagnostics(), sourceCounts: this.sources.counts(s) } : {}) },
       logs: this.store.get<any[]>("logs", []),
       liveAllowed: this.liveAllowed,
       credentials: {

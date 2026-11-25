@@ -1,7 +1,8 @@
-import type { Exchange, Settings, Signal } from "./config";
+import { tfMs, type Exchange, type Settings, type Signal } from "./config";
 
 export const HOOK_FORMATION_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
 const MAX_AGE = 120_000;
+const REFRESH_MS = 45_000;
 type Source = "regular" | "early";
 type Key = { exchange: Exchange; symbol: string; timeframe: string };
 type Row = { symbol: string; until: number };
@@ -18,13 +19,20 @@ export function readHookCandidates(data: unknown, exchange: Exchange, timeframe:
     if (!coin || coin.exchange !== exchange || coin.marketType !== "futures" || coin.timeframe !== timeframe ||
         coin.quoteAsset !== "USDT" || typeof coin.symbol !== "string" || !/^[A-Z0-9]{1,30}USDT$/.test(coin.symbol) ||
         !fresh(coin.lastUpdated, now) || !Number.isFinite(coin.currentPrice) || coin.currentPrice <= 0) continue;
+    const proof = coin.formationData;
+    const interval = tfMs(timeframe);
+    if (!interval || proof?.contiguous !== true || !fresh(proof.collectedAt, now) ||
+        proof.collectedAt > coin.lastUpdated || !Number.isSafeInteger(proof.lastClosedAt) ||
+        proof.lastClosedAt <= 0 || proof.lastClosedAt > proof.collectedAt ||
+        proof.lastClosedAt % interval !== 0 || now - proof.lastClosedAt > interval + 90_000) continue;
     const patterns = source === "regular" ? coin.formations : coin.earlyFormations;
     if (!Array.isArray(patterns) || !patterns.some((p: any) => p && typeof p.id === "string" && p.id.length > 0 &&
         p.source !== "screener_24h_preview" &&
         (p.bias === "bullish" || p.bias === "bearish") &&
-        (source === "regular" ? p.validation?.enoughData === true && p.validation?.finiteData === true
+        (source === "regular" ? p.validation?.enoughData === true && p.validation?.finiteData === true &&
+            ["forming","ready_to_break","breakout","retest"].includes(p.status)
           : p.stage === "forming" || p.stage === "potential"))) continue;
-    rows.push({ symbol: coin.symbol, until: coin.lastUpdated + MAX_AGE });
+    rows.push({ symbol: coin.symbol, until: Math.min(coin.lastUpdated + MAX_AGE, proof.collectedAt + MAX_AGE, proof.lastClosedAt + interval + 90_000) });
   }
   return rows;
 }
@@ -33,6 +41,13 @@ export class HookFormationSources {
   private snapshots = new Map<string, Snapshot>();
   private jobs = new Map<string, Promise<void>>();
   private errors = new Map<string, string>();
+  private generation = 0;
+  invalidate() {
+    this.generation++;
+    this.snapshots.clear();
+    this.jobs.clear();
+    this.errors.clear();
+  }
   constructor(private fetcher: typeof fetch = fetch, private now: () => number = Date.now) {}
   private async request(path: string, init: RequestInit = {}) {
     const response = await this.fetcher(new URL(path, "https://h00k.top"), {
@@ -48,7 +63,8 @@ export class HookFormationSources {
     const existing = this.jobs.get(key);
     if (existing) return existing;
     const cached = this.snapshots.get(key);
-    if (cached && this.now() - cached.checkedAt < 45_000) return Promise.resolve();
+    if (cached && this.now() - cached.checkedAt < REFRESH_MS) return Promise.resolve();
+    const generation = this.generation;
     const job = (async () => {
       try {
         let data: unknown;
@@ -66,15 +82,17 @@ export class HookFormationSources {
             throw new Error("Ранній пошук ще не готовий або неповний");
           data = scan.data;
         }
+        if (generation !== this.generation) return;
         const now = this.now();
         this.snapshots.set(key, {rows:new Map(readHookCandidates(data,exchange,timeframe,source,now).map(r=>[r.symbol,r.until])),checkedAt:now});
         this.errors.delete(key);
       } catch (error) {
         // Never keep a last-good allowlist after a failed refresh.
+        if (generation !== this.generation) return;
         this.snapshots.delete(key);
         this.errors.set(key, error instanceof Error ? error.message : "Джерело недоступне");
       }
-    })().finally(()=>this.jobs.delete(key));
+    })().finally(()=>{ if (generation === this.generation) this.jobs.delete(key); });
     this.jobs.set(key,job);
     return job;
   }
@@ -91,11 +109,14 @@ export class HookFormationSources {
     if (!enabled(settings,source) || key.exchange !== settings.exchange || !settings.timeframes.includes(key.timeframe)) return false;
     const snapshot = this.snapshots.get(scope(key.exchange,key.timeframe,source));
     const now = this.now();
-    return !!snapshot && fresh(snapshot.checkedAt,now) && (snapshot.rows.get(key.symbol) ?? 0) > now;
+    return !!snapshot && now >= snapshot.checkedAt && now - snapshot.checkedAt < REFRESH_MS && (snapshot.rows.get(key.symbol) ?? 0) > now;
   }
   allows(key: Key, settings: Settings) { return this.has(key,settings,"regular") || this.has(key,settings,"early"); }
   allowsEntry(signal: Signal, settings: Settings) {
     return this.has(signal,settings,"regular") || (signal.status === "confirmed" && this.has(signal,settings,"early"));
   }
   diagnostics() { return Object.fromEntries(this.errors); }
+  counts(settings: Settings) {
+    return Object.fromEntries((["regular","early"] as const).map(source=>[source, [...new Set(settings.timeframes.flatMap(tf=>[...(this.snapshots.get(scope(settings.exchange,tf,source))?.rows.keys() ?? [])].filter(symbol=>this.has({exchange:settings.exchange,timeframe:tf,symbol},settings,source))))].length]));
+  }
 }
