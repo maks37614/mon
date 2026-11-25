@@ -16,14 +16,14 @@ export function readHookCandidates(data: unknown, exchange: Exchange, timeframe:
   const rows: Row[] = [];
   for (const coin of data) {
     if (!coin || coin.exchange !== exchange || coin.marketType !== "futures" || coin.timeframe !== timeframe ||
-        coin.quoteAsset !== "USDT" || typeof coin.symbol !== "string" || !/^[A-Z0-9]{3,30}USDT$/.test(coin.symbol) ||
+        coin.quoteAsset !== "USDT" || typeof coin.symbol !== "string" || !/^[A-Z0-9]{1,30}USDT$/.test(coin.symbol) ||
         !fresh(coin.lastUpdated, now) || !Number.isFinite(coin.currentPrice) || coin.currentPrice <= 0) continue;
     const patterns = source === "regular" ? coin.formations : coin.earlyFormations;
     if (!Array.isArray(patterns) || !patterns.some((p: any) => p && typeof p.id === "string" && p.id.length > 0 &&
         p.source !== "screener_24h_preview" &&
         (p.bias === "bullish" || p.bias === "bearish") &&
         (source === "regular" ? p.validation?.enoughData === true && p.validation?.finiteData === true
-          : p.stage === "forming" || p.stage === "watching"))) continue;
+          : p.stage === "forming" || p.stage === "potential"))) continue;
     rows.push({ symbol: coin.symbol, until: coin.lastUpdated + MAX_AGE });
   }
   return rows;
