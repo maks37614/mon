@@ -330,3 +330,26 @@ test("old pre-entry tick cannot trigger a stop on a new position",async t=>{
   (f.trading as any).paperTick("binance","BTCUSDT",{at:p.openedAt-1,last:1,mark:1});await f.trading.monitor();
   assert.equal(f.trading.snapshot().positions.length,1);assert.equal(f.trading.snapshot().history.length,0);
 });
+
+test("Bybit trade batches preserve a short stop crossing and reject wrong or stale trades",()=>{
+ class Socket extends EventTarget {readyState=1;sent:string[]=[];send(s:string){this.sent.push(s)}close(){}message(data:any){this.dispatchEvent(new MessageEvent("message",{data:JSON.stringify(data)}))}}
+ const socket=new Socket(),ticks:any[]=[];const feed=new PaperFeed((_e,_s,t)=>ticks.push(t),()=>{},()=>socket as any);
+ const at=Date.now();
+ try {
+  feed.sync([{exchange:"bybit",symbol:"BTCUSDT"}]);socket.dispatchEvent(new Event("open"));
+  assert.ok(socket.sent[0].includes("publicTrade.BTCUSDT"));
+  socket.message({topic:"publicTrade.BTCUSDT",ts:at,data:[{s:"BTCUSDT",T:at,p:"101"},{s:"BTCUSDT",T:at-1,p:"99"},{s:"ETHUSDT",T:at,p:"1"},{s:"BTCUSDT",T:at-6000,p:"1"}]});
+  assert.deepEqual(ticks.map(t=>t.last),[99,101]);
+  socket.message({topic:"tickers.BTCUSDT",ts:at,data:{lastPrice:"102",markPrice:"100.1"}});
+  assert.equal(ticks[2].last,undefined);assert.equal(ticks[2].mark,100.1);
+ }finally{feed.stop()}
+});
+test("latched websocket crossing closes without fresh REST ticker",async t=>{
+ const f=fixture(t);await f.trading.enter("signal");
+ const internal=f.trading as any;
+ internal.paperTicks.set("binance:BTCUSDT",{at:Date.now(),trigger:{at:Date.now(),reference:99,reason:"SL"}});
+ f.market.getContractState=async()=>{throw Error("ticker unavailable")};
+ await f.trading.monitor();
+ assert.equal(f.trading.snapshot().positions.length,0);
+ assert.equal(f.trading.snapshot().history[0].reason,"SL");
+});

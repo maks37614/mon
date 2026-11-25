@@ -31,7 +31,7 @@ export class PaperFeed {
       return;
     }
     this.retryAfter.delete(key);
-    let receivedAt = Date.now(), stopped = false;
+    let receivedAt = Date.now(), stopped = false, lastTradeReceivedAt=0;
     const retry = () => {
       if (stopped) return; stopped = true; this.gap(exchange, symbol); clearInterval(connection.timer);
       try { socket.close(); } catch { /* A failed close does not prevent reconnect. */ }
@@ -52,7 +52,7 @@ export class PaperFeed {
     socket.addEventListener("open", () => {
       if (stopped) return;
       if (exchange === "bybit") {
-        try { socket.send(JSON.stringify({ op: "subscribe", args: [`tickers.${symbol}`] })); } catch { retry(); }
+        try { socket.send(JSON.stringify({ op: "subscribe", args: [`tickers.${symbol}`,`publicTrade.${symbol}`] })); } catch { retry(); }
       }
     });
     socket.addEventListener("message", (event: MessageEvent) => {
@@ -63,7 +63,20 @@ export class PaperFeed {
           // Heartbeats prove connectivity, not delivery of usable prices.
           return;
         }
-        const at = Number(exchange === "binance" ? row.E : raw.ts);
+        if(exchange==="bybit" && raw.topic===`publicTrade.${symbol}`) {
+          if(!Array.isArray(raw.data)) return;
+          // Each trade is delivered separately, including a transient crossing in a batch.
+          const trades=raw.data.filter((trade:any)=>trade?.s===symbol && trade.T!=null && trade.p!=null &&
+            Number.isSafeInteger(Number(trade.T)) && Math.abs(Date.now()-Number(trade.T))<=5000 &&
+            Number.isFinite(Number(trade.p)) && Number(trade.p)>0)
+            .sort((a:any,b:any)=>Number(a.T)-Number(b.T));
+          for(const trade of trades) {
+            receivedAt=lastTradeReceivedAt=Date.now();
+            this.receive(exchange,symbol,{at:Number(trade.T),last:Number(trade.p)});
+          }
+          return;
+        }
+        const at = Number(exchange === "binance" ? (row.e==="aggTrade" ? row.T ?? row.E : row.E) : raw.ts);
         if (!Number.isFinite(at) || Math.abs(Date.now() - at) > 5000) return;
         let tick: PriceTick;
         if (exchange === "binance") {
@@ -72,7 +85,7 @@ export class PaperFeed {
             : row.e === "markPriceUpdate" ? { at, mark: Number(row.p) } : { at };
         } else {
           if (raw.topic !== `tickers.${symbol}` || (row.symbol !== undefined && row.symbol !== symbol)) return;
-          tick = { at, ...(row.lastPrice !== undefined ? { last: Number(row.lastPrice) } : {}),
+          tick = { at, ...(row.lastPrice !== undefined && (!lastTradeReceivedAt || Date.now()-lastTradeReceivedAt>15000) ? { last: Number(row.lastPrice) } : {}),
             ...(row.markPrice !== undefined ? { mark: Number(row.markPrice) } : {}) };
         }
         if ((tick.last !== undefined && (!Number.isFinite(tick.last) || !(tick.last > 0))) || (tick.mark !== undefined && (!Number.isFinite(tick.mark) || !(tick.mark > 0)))) return;

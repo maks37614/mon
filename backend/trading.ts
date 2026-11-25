@@ -817,6 +817,12 @@ export class Trading {
     const state = p.paper!, key = `${p.exchange}:${p.symbol}`, tick = this.paperTicks.get(key);
     if (state.closeFill) { await this.finishPaper(b, p, state.closeFill.reference, state.closeFill.reason); return; }
     if (state.closeTrigger) { await this.finishPaper(b,p,state.closeTrigger.reference,state.closeTrigger.reason); return; }
+    if(tick?.trigger) {
+      state.closeTrigger=tick.trigger;
+      this.save("paper",b);
+      await this.finishPaper(b,p,state.closeTrigger.reference,state.closeTrigger.reason);
+      return;
+    }
     if (Date.now() - state.lastObservedAt > 15000 && !state.warnings.includes("monitoring-gap")) state.warnings.push("monitoring-gap");
     if (this.paperGaps.delete(key) && !state.warnings.includes("stream-gap")) state.warnings.push("stream-gap");
     let last = tick?.last, mark = tick?.mark;
