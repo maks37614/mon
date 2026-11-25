@@ -29,7 +29,9 @@ import { TradingScheduleSettings } from "./components/TradingScheduleSettings";
 import type { TradingScheduleState } from "../backend/tradingSchedule";
 import "./dashboard.css";
 
+type VisibleSignal = Signal & {canEnter?:boolean;entryReasons?:string[];lastAutoDecision?:{at:number;reason:string;state:"skipped"|"opened"|"pending"}|null};
 type Snapshot = {
+  autoBlockReason?:string|null;
   settings: Settings;
   entrySchedule: TradingScheduleState;
   positions: any[];
@@ -38,7 +40,7 @@ type Snapshot = {
   stats: any;
   scanner: any;
   signals: Signal[];
-  formations?: (Signal & { canEnter?: boolean })[];
+  formations?: VisibleSignal[];
   logs: any[];
   credentials: Record<string, { configured: boolean; verified: boolean }>;
   liveAllowed: boolean;
@@ -797,7 +799,7 @@ export default function App() {
       initialTimeframe: TIMEFRAMES.includes(timeframe) ? timeframe : "1m",
     });
   }
-  const formations: (Signal & { canEnter?: boolean })[] = [...(data.formations || data.signals)];
+  const formations: VisibleSignal[] = [...(data.formations || data.signals)];
   formations.sort((left, right) =>
     Number(right.canEnter !== false) - Number(left.canEnter !== false) ||
     right.candleAt - left.candleAt || right.confidence - left.confidence || right.detectedAt - left.detectedAt);
@@ -809,7 +811,8 @@ export default function App() {
   const emptyScreener = screenerEmptyState(scan, s, data.schedulerMode,
     !!query.trim(), formations.length);
   const displayedSignals = signals.slice(0, 200);
-  const scanOverdue = scanIsOverdue(scan, s);
+  const scanOverdue = scan.sourceCoverage ? scan.sourceCoverage.some((x:any)=>x.supported && !x.fresh && !x.refreshing) : scanIsOverdue(scan, s);
+  const scanWait=Math.max(0,Math.ceil(((scan.lastStartedAt||0)+s.scanIntervalSeconds*1000-Date.now())/1000));
   const remaining = scan.total ? scan.total - (scan.cursor || 0) : 0;
   const minutes = scan.total
     ? (Math.ceil(scan.total / s.scanBatchSize) *
@@ -946,21 +949,19 @@ export default function App() {
               </p>
             </div>
             <button
-              disabled={busy || scan.running}
+              disabled={busy || scan.running || scanWait>0}
               onClick={() =>
                 run(
                   async () => {
                     const result = await api("/api/scan", {});
-                    if (!result.accepted && result.reason === "interval")
-                      throw new Error(`Між пакетами потрібна пауза ${s.scanIntervalSeconds} с. Перевірте час останнього запуску.`);
                     return result;
                   },
-                  "Пакет сканування запущено",
+                  "Запит оновлення опрацьовано",
                 )
               }
             >
               <RefreshCw size={16} className={scan.running ? "spinning" : ""} />
-              {scan.running ? "Скануємо…" : "Сканувати пакет"}
+              {scan.running ? "Оновлюємо…" : scanWait>0 ? `Оновлення через ${scanWait} с` : scan.sourceCoverage ? "Оновити формації" : "Сканувати пакет"}
             </button>
           </div>
           {data.entrySchedule?.enabled && (
@@ -1096,7 +1097,7 @@ export default function App() {
                   <div className="section-heading">
                     <h2>Охоплення ринку</h2>
                     <span className={`pill ${scan.running ? "positive" : ""}`}>
-                      {scan.running ? "Обробка пакета" : "Очікування розкладу"}
+                      {scan.sourceCoverage ? (scan.sourceCoverage.some((x:any)=>x.refreshing)?"Оновлення джерела":scan.sourceCoverage.some((x:any)=>x.error)?"Є помилки джерела":scan.sourceCoverage.length && scan.sourceCoverage.every((x:any)=>x.fresh)?"Актуальні дані":"Очікування даних") : scan.running ? "Обробка пакета" : "Очікування розкладу"}
                     </span>
                   </div>
                   {scan.sourceCoverage ? <div className="coverage-values">
@@ -1134,6 +1135,7 @@ export default function App() {
                       відповідь {scope.responseMs==null?"—":`${scope.responseMs} мс`} · отримано монет {scope.receivedCoins??"—"}, формацій {scope.receivedPatterns??"—"} · після перевірок {scope.validPatterns} · після фільтрів {scope.visiblePatterns} · допущено {scope.eligiblePatterns}
                     </p>)}
                     <p className="muted">Покриття залежить від API h00k.top; це не повний прохід усіх контрактів біржі.</p>
+                    {data.autoBlockReason && <p className="muted">Автовходи: {data.autoBlockReason}</p>}
                   </div>}
                 </div>
                 <div className="coverage-aside">
@@ -1390,8 +1392,7 @@ export default function App() {
                         від таймфрейму; для нового входу діє окремий ліміт {s.maxSignalAgeSeconds} с.
                       </p>
                       <p className="muted">
-                        Оцінка якості: структура до 60, пробій до 25, обсяг до 15 балів.
-                        Це не ймовірність прибутку. Натисніть оцінку, щоб побачити складові.
+                        {scan.sourceCoverage ? "Оцінка та підтвердження надходять з h00k.top. Це не ймовірність прибутку. Ранні формації не мають оцінки входу." : "Оцінка якості: структура до 60, пробій до 25, обсяг до 15 балів. Це не ймовірність прибутку."}
                       </p>
                       {signals.length > displayedSignals.length && (
                         <p className="muted">Показано перші {displayedSignals.length} із {signals.length}. Уточніть пошук, щоб побачити інші монети.</p>
@@ -1454,7 +1455,7 @@ export default function App() {
                                   <span>Структура: {signal.scoreParts.structure}/60</span>
                                   <span>Пробій: {signal.scoreParts.breakout}/25</span>
                                   <span>Обсяг: {signal.scoreParts.volume}/15</span>
-                                </div> : <div>Для складових потрібне повторне сканування.</div>}
+                                </div> : <div>{signal.source?.startsWith("hook_")?"Деталі оцінки доступні на сторінці формацій h00k.top.":"Для складових потрібне повторне сканування."}</div>}
                                 <p>{signal.description}</p>
                               </details>
                             </td>
@@ -1468,7 +1469,7 @@ export default function App() {
                               <button
                                 disabled={busy || ("canEnter" in signal && signal.canEnter === false)}
                                 title={"canEnter" in signal && signal.canEnter === false
-                                  ? "Формація видима для аналізу, але не пройшла умови допуску до входу"
+                                  ? signal.entryReasons?.join("; ") || "Формація не пройшла умови допуску до входу"
                                   : undefined}
                                 onClick={() => {
                                   if (
@@ -1489,6 +1490,8 @@ export default function App() {
                                   ? "Вхід заблоковано"
                                   : live ? "Реальний вхід" : "Тестовий вхід"}
                               </button>
+                              {!!signal.entryReasons?.length && <small>{signal.entryReasons.join(" · ")}</small>}
+                              {signal.lastAutoDecision && <small>Остання спроба: {signal.lastAutoDecision.reason} · {date(signal.lastAutoDecision.at)}</small>}
                             </td>
                           </tr>
                         ))}

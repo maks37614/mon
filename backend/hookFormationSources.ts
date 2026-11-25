@@ -7,7 +7,7 @@ const REFRESH_MS = 45_000;
 const POLL_MS = 30_000;
 type Source = "regular" | "early";
 type Key = { exchange: Exchange; symbol: string; timeframe: string };
-type Row = { symbol: string; until: number; signal: Signal; blocked: boolean };
+type Row = { symbol: string; until: number; signal: Signal; blocked: boolean; blockReasons: string[] };
 type Snapshot = { rows: Map<string, Row>; checkedAt: number; receivedCoins: number; receivedPatterns: number; responseMs: number };
 const TYPES: Record<string,string> = {
   double_top:"Double Top", double_bottom:"Double Bottom", asc_triangle:"Ascending Triangle",
@@ -88,11 +88,16 @@ export function readHookCandidates(data: unknown, exchange: Exchange, timeframe:
       const invalidated = Array.isArray(plan?.afterEntry) && plan.afterEntry.some((bar: unknown) =>
         !Array.isArray(bar) || bar.length !== 2 || !positive(bar[0]) || !positive(bar[1]) || bar[0] < bar[1] ||
         (direction === "LONG" ? bar[1] <= stopLoss || bar[0] >= takeProfit : bar[0] >= stopLoss || bar[1] <= takeProfit));
-      const blocked = early || invalidated || plan?.entryExpired === true ||
-        (v?.breakoutConfirmed === true && plan?.structureActive === false) ||
-        v?.entryMode === "WAIT_RETEST" || v?.confluence?.flow?.entryBlockedByFlow === true ||
-        !isInsideHookPlan(signal,coin.currentPrice);
-      rows.push({symbol:coin.symbol,signal,blocked,until:Math.min(coin.lastUpdated+MAX_AGE,proof.collectedAt+MAX_AGE,proof.lastClosedAt+interval+90_000)});
+      const blockReasons:string[]=[];
+      if(early) blockReasons.push("Рання формація — лише спостереження");
+      if(invalidated) blockReasons.push("Після сигналу досягнуто стоп або ціль, чи дані свічок некоректні");
+      if(plan?.entryExpired===true) blockReasons.push("Торговий план h00k прострочено");
+      if(v?.breakoutConfirmed===true && plan?.structureActive===false) blockReasons.push("Пробитий рівень втрачено");
+      if(v?.entryMode==="WAIT_RETEST") blockReasons.push("Очікування ретесту h00k");
+      if(v?.confluence?.flow?.entryBlockedByFlow===true) blockReasons.push("Потік угод блокує вхід");
+      if(!isInsideHookPlan(signal,coin.currentPrice)) blockReasons.push("Поточна ціна поза планом h00k");
+      const blocked=blockReasons.length>0;
+      rows.push({symbol:coin.symbol,signal,blocked,blockReasons,until:Math.min(coin.lastUpdated+MAX_AGE,proof.collectedAt+MAX_AGE,proof.lastClosedAt+interval+90_000)});
     }
   }
   return rows;
@@ -234,6 +239,17 @@ export class HookFormationSources {
     // Early candidates have no confirmed entry or calibrated score on h00k. Never manufacture either.
     if (signal.source !== "hook_regular" || !signalAllowsEntry(signal,settings,this.now())) return false;
     return this.activeRows(settings,"regular").some(row=>!row.blocked && sameSignal(signal,row.signal));
+  }
+  entryReasons(signal:Signal,settings:Settings):string[] {
+    if(signal.source==="hook_early") return ["Рання формація — лише спостереження"];
+    if(signal.source!=="hook_regular") return ["Невідоме джерело формації"];
+    const row=this.activeRows(settings,"regular").find(r=>sameSignal(signal,r.signal));
+    if(!row) return ["Формація h00k більше не актуальна"];
+    const reasons=[...row.blockReasons];
+    if(settings.confirmedOnly && signal.status!=="confirmed") reasons.push("Вхід h00k ще не підтверджено");
+    if(this.now()-signal.candleAt>settings.maxSignalAgeSeconds*1000) reasons.push("Перевищено максимальний вік сигналу");
+    if(!signalAllowsEntry(signal,settings,this.now()) && !reasons.length) reasons.push("Не відповідає фільтрам входу");
+    return reasons;
   }
   diagnostics(settings?:Settings) { if(!settings) return Object.fromEntries(this.errors); const keys=new Set(settings.timeframes.flatMap(tf=>(["regular","early"] as const).filter(source=>enabled(settings,source)).map(source=>scope(settings.exchange,tf,source,settings.hookMinVolumeUsd??0)))); return Object.fromEntries([...this.errors].filter(([key])=>keys.has(key))); }
   coverage(settings:Settings) {

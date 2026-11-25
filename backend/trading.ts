@@ -79,6 +79,12 @@ export class Trading {
   private mutex = new Mutex();
   private timer: ReturnType<typeof setInterval> | null = null;
   private rejectedEntries = new Map<string, number>();
+  private autoDecisions=new Map<string,{at:number;reason:string;state:"skipped"|"opened"|"pending"}>();
+  private recordAutoDecision(id:string,state:"skipped"|"opened"|"pending",reason:string) {
+    this.autoDecisions.delete(id);
+    this.autoDecisions.set(id,{at:Date.now(),state,reason});
+    while(this.autoDecisions.size>300) this.autoDecisions.delete(this.autoDecisions.keys().next().value!);
+  }
   private monitoring = false;
   private running = false;
   private lastLiveCycle = 0;
@@ -202,8 +208,17 @@ export class Trading {
     const now = Date.now();
     const formations = (this.sources ? this.sources.signals(s) : this.store.get<Signal[]>("signals", []))
       .filter((signal) => formationIsVisible(signal, s, now));
+    const autoBlockReason=!s.autoEntries?"Автоматичні входи вимкнено"
+      :!tradingScheduleState(s.tradingSchedule,now).allowed?"Поза торговим розкладом"
+      :s.mode==="live" && (!this.liveAllowed || !this.vault.status(s.exchange).verified)?"Реальний режим або API не дозволено"
+      :b.pending.length?"Очікування узгодження ордерів"
+      :b.positions.some(p=>p.status!=="active")?"Позиції потребують узгодження"
+      :b.positions.length>=s.maxPositions?"Досягнуто ліміт позицій"
+      :now-b.lastEntryAt<s.entryIntervalSeconds*1000?"Інтервал між циклами входу"
+      :null;
     return {
       settings: s,
+      autoBlockReason,
       entrySchedule: tradingScheduleState(s.tradingSchedule, now),
       positions: b.positions.map(({ intent, ...p }) => ({
         ...p,
@@ -232,9 +247,18 @@ export class Trading {
         accountAt: b.accountAt || null,
       },
       signals: formations.filter((signal) => signalAllowsEntry(signal, s, now) && (!this.sources || this.sources.allowsEntry(signal, s))),
-      formations: formations.map((signal) => ({
-        ...signal, canEnter: signalAllowsEntry(signal, s, now) && (!this.sources || this.sources.allowsEntry(signal, s)),
-      })),
+      formations: formations.map((signal) => {
+        const reasons=this.sources?.entryReasons(signal,s)??(!signalAllowsEntry(signal,s,now)?["Сигнал не відповідає умовам входу"]:[]);
+        if(b.used[signal.id]) reasons.push("Сигнал уже використано");
+        if(b.positions.some(p=>p.symbol===signal.symbol)) reasons.push("Позиція по монеті вже відкрита");
+        if(b.positions.length>=s.maxPositions) reasons.push("Досягнуто ліміт позицій");
+        if(b.pending.length || b.positions.some(p=>p.status!=="active")) reasons.push("Очікування узгодження ордерів");
+        if(now-(b.lastEntries[signal.symbol]||0)<s.entryCooldownSeconds*1000) reasons.push("Пауза повторного входу");
+        if(s.mode==="live" && (!this.liveAllowed || !this.vault.status(s.exchange).verified)) reasons.push("Реальний режим або API не дозволено");
+        const last=this.autoDecisions.get(signal.id);
+        return {...signal,canEnter:!reasons.length,entryReasons:reasons,
+          lastAutoDecision:last && now-last.at<15*60_000?last:null};
+      }),
       scanner: { ...this.store.get<any>("scanner", {}), ...(this.sources ? { sourceErrors: this.sources.diagnostics(s), sourceCounts: this.sources.counts(s), sourceCoverage: this.sources.coverage(s) } : {}) },
       logs: this.store.get<any[]>("logs", []),
       liveAllowed: this.liveAllowed,
@@ -338,11 +362,15 @@ export class Trading {
                 break;
               try {
                 await this.enterLocked(signal, true);
+                const current=this.book(s.mode);
+                this.recordAutoDecision(signal.id,current.positions.some(p=>p.intent.signal.id===signal.id && p.status==="active")?"opened":"pending",
+                  current.positions.some(p=>p.intent.signal.id===signal.id && p.status==="active")?"Позицію відкрито":"Результат виконання потребує узгодження");
               } catch (error) {
                 const message = error instanceof Error ? error.message : "";
                 // Do not expose raw exchange request URLs, signatures, API keys or response bodies.
                 const reason = /^[А-Яа-яІіЇїЄєҐґ]/u.test(message) && !/https?:|api.?key|signature|secret|[{}]/i.test(message)
                   ? message.slice(0,180) : exchangeError(error);
+                this.recordAutoDecision(signal.id,"skipped",reason);
                 const key = signal.exchange + ":" + signal.symbol + ":" + reason;
                 const at = Date.now();
                 if (at - (this.rejectedEntries.get(key) || 0) >= 60_000) {

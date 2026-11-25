@@ -91,3 +91,10 @@ test("volume scopes cannot reuse old authorization or accept below-threshold coi
 test("contradictory breakout status and retest entry mode never confirm",()=>{
  const result=read({...coin,formations:[{...pattern,validation:{...validation,entryMode:"RETEST"}}]});assert.equal(result[0].signal.status,"watching");
 });
+
+test("blocked source rows expose accurate reasons without changing authorization",async()=>{
+ const data=[{...coin,formations:[{...pattern,validation:{...validation,entryMode:"WAIT_RETEST",passed:false}}]}];
+ const source=new HookFormationSources((async()=>Response.json({success:true,data})) as typeof fetch,()=>now);
+ const s={...settings,confirmedOnly:false};await source.refresh(s);const row=source.signals(s)[0];assert.ok(row);
+ assert.equal(source.allowsEntry(row,s),false);assert.ok(source.entryReasons(row,s).some(r=>r.includes("ретесту")));
+});
