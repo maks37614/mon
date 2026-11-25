@@ -810,3 +810,14 @@ test("exchange account rejects malformed active positions or missing wallet inst
   balance={};await assert.rejects(gateway.account("binance"),/Неповна/);
   balance={USDT:{free:100,total:100}};positions=[{contracts:1,side:"unknown",entryPrice:100}];await assert.rejects(gateway.account("binance"),/Некоректні/);
 });
+
+test("credential replacement waits for verification and never inherits the old key verification",async t=>{
+  const f=fixture(t,"paper");f.vault.save("binance","old-key","old-secret");
+  let release!:()=>void, started!:()=>void;const ready=new Promise<void>(r=>{started=r;});
+  f.broker.account=async()=>{started();await new Promise<void>(r=>{release=r;});return {free:100,total:100,positions:[]};};
+  f.broker.invalidate=()=>{};
+  const verification=f.trading.verifyCredentials("binance");await ready;
+  const replacement=f.trading.saveCredentials("binance","new-key","new-secret");
+  assert.equal(f.vault.load("binance")!.apiKey,"old-key");release();await verification;await replacement;
+  assert.equal(f.vault.load("binance")!.apiKey,"new-key");assert.equal(f.vault.status("binance").verified,false);
+});

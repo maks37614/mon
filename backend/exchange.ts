@@ -144,7 +144,7 @@ export class ExchangeGateway {
       return client;
     })();
     this.clients.set(exchange, promise);
-    promise.catch(() => this.clients.delete(exchange));
+    promise.catch(() => { if (this.clients.get(exchange) === promise) this.clients.delete(exchange); });
     return promise;
   }
   private symbol(client: any, symbol: string) {

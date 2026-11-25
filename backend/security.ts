@@ -205,7 +205,8 @@ export class Auth {
       if (
         typeof password !== "string" ||
         !safeEqual(String(username || ""), this.username) ||
-        !(await checkPassword(password, hash))
+        !(await checkPassword(password, hash)) ||
+        this.store.get("passwordHash", this.initialHash) !== hash
       )
         return res.status(401).json({ error: "Неправильний логін або пароль" });
       this.attempts.delete(ip);
@@ -229,15 +230,16 @@ export class Auth {
     res.json({ ok: true });
   };
   changePassword = async (req: Request, res: Response) => {
+    const previous = this.store.get("passwordHash", this.initialHash);
     if (
-      typeof req.body.currentPassword !== "string" ||
-      !(await checkPassword(
-        req.body.currentPassword,
-        this.store.get("passwordHash", this.initialHash),
-      ))
+      typeof req.body?.currentPassword !== "string" ||
+      typeof req.body?.newPassword !== "string" ||
+      !(await checkPassword(req.body.currentPassword, previous))
     )
-      return res.status(400).json({ error: "Поточний пароль неправильний" });
-    const hash = await hashPassword(String(req.body.newPassword || ""));
+      return res.status(400).json({ error: "Поточний пароль неправильний або некоректний запит" });
+    const hash = await hashPassword(req.body.newPassword);
+    if (this.store.get("passwordHash", this.initialHash) !== previous || !this.session(req))
+      return res.status(409).json({error:"Сесію або пароль уже змінено. Увійдіть повторно."});
     this.store.transaction(() => {
       this.store.set("passwordHash", hash);
       this.store.db.exec("DELETE FROM sessions");

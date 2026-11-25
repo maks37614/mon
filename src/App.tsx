@@ -1050,7 +1050,7 @@ export default function App() {
                     Icon: BarChart3,
                   },
                   {
-                    label: "Закритий P&L",
+                    label: data.stats.provisionalTrades > 0 ? "P&L історії (попередній)" : "P&L історії (до 1000 угод)",
                     value: `${data.stats.closedNetPnl >= 0 ? "+" : ""}${money(data.stats.closedNetPnl)}`,
                     unit: "USDT",
                     positive: data.stats.closedNetPnl >= 0,
@@ -1077,6 +1077,7 @@ export default function App() {
                   </div>
                 ))}
               </div>
+              {data.stats.provisionalTrades > 0 && <p className="muted">Угоди з неповною звіркою комісій або funding: {data.stats.provisionalTrades}. P&L охоплює лише до 1000 останніх збережених угод.</p>}
               <section className="panel coverage-panel">
                 <div>
                   <div className="section-heading">

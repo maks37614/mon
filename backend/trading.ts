@@ -155,7 +155,26 @@ export class Trading {
       return next;
     });
   }
-  async verifyCredentials(exchange: Exchange) {
+  saveCredentials(exchange: Exchange, apiKey: string, secret: string) {
+    return this.mutex.run(async () => {
+      if (this.hasLiveExposure() || this.settings().mode === "live")
+        throw new Error("Спочатку закрийте реальні позиції та вимкніть реальний режим");
+      this.vault.save(exchange,apiKey,secret);
+      this.gateway.invalidate(exchange);
+      return this.vault.status(exchange);
+    });
+  }
+  removeCredentials(exchange: Exchange) {
+    return this.mutex.run(async () => {
+      if (this.hasLiveExposure() || this.settings().mode === "live")
+        throw new Error("Спочатку закрийте реальні позиції та вимкніть реальний режим");
+      this.vault.remove(exchange);
+      this.gateway.invalidate(exchange);
+      return this.vault.status(exchange);
+    });
+  }
+  verifyCredentials(exchange: Exchange) {
+    return this.mutex.run(async () => {
     try {
       const account = await this.gateway.account(exchange);
       this.vault.verify(exchange);
@@ -169,6 +188,7 @@ export class Trading {
         e?.message?.startsWith("Потрібен") ? e.message : exchangeError(e),
       );
     }
+    });
   }
   snapshot() {
     const s = this.settings(),
@@ -204,6 +224,8 @@ export class Trading {
         ),
         totalTrades: history.length,
         winRate: history.length ? (wins / history.length) * 100 : 0,
+        historyLimit:1000,
+        provisionalTrades:history.filter(t=>!t.estimated && (t.feesComplete!==true || t.fundingComplete!==true)).length,
         accountAt: b.accountAt || null,
       },
       signals: formations.filter((signal) => signalAllowsEntry(signal, s, now) && (!this.sources || this.sources.allowsEntry(signal, s))),

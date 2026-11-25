@@ -147,7 +147,7 @@ export function createApplication(options: Options) {
         incoming &&
         ["exchange", "timeframes", "candleLimit"].some(
           (k) =>
-            JSON.stringify(incoming[k]) !==
+            Object.hasOwn(incoming,k) && JSON.stringify(incoming[k]) !==
             JSON.stringify(previous[k as keyof typeof previous]),
         )
       )
@@ -175,34 +175,17 @@ export function createApplication(options: Options) {
   };
   app.post(
     "/api/credentials/:exchange",
-    route((req, res) => {
+    route(async (req, res) => {
       const exchange = exchangeParam(req);
-      if (trading.hasLiveExposure())
-        throw new Error(
-          "Не можна змінювати ключі під час відкритих або неузгоджених реальних позицій",
-        );
-      if (trading.settings().mode === "live")
-        throw new Error("Перед зміною ключів перейдіть у віртуальний режим");
-      vault.save(
-        exchange,
-        String(req.body.apiKey || "").trim(),
-        String(req.body.apiSecret || "").trim(),
-      );
-      gateway.invalidate(exchange);
-      res.json(vault.status(exchange));
+      if (typeof req.body?.apiKey !== "string" || typeof req.body?.apiSecret !== "string")
+        throw new Error("Некоректний формат ключів");
+      res.json(await trading.saveCredentials(exchange,req.body.apiKey.trim(),req.body.apiSecret.trim()));
     }),
   );
   app.delete(
     "/api/credentials/:exchange",
-    route((req, res) => {
-      const exchange = exchangeParam(req);
-      if (trading.hasLiveExposure() || trading.settings().mode === "live")
-        throw new Error(
-          "Спочатку закрийте реальні позиції та вимкніть реальний режим",
-        );
-      vault.remove(exchange);
-      gateway.invalidate(exchange);
-      res.json({ configured: false, verified: false });
+    route(async (req, res) => {
+      res.json(await trading.removeCredentials(exchangeParam(req)));
     }),
   );
   app.post(
