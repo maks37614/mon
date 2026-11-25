@@ -78,7 +78,7 @@ test("early source normalizes seconds and polls a running shared job instead of 
 });
 test("regular request uses chosen volume and rejects inconsistent response counts",async()=>{
  let request="";const source=new HookFormationSources((async(input)=>{request=String(input);return Response.json({success:true,count:2,data:[coin]});}) as typeof fetch,()=>now);
- await source.refresh({...settings,hookMinVolumeUsd:50000});assert.match(request,/minVolume=50000/);assert.equal(source.signals(settings).length,0);assert.match(Object.values(source.diagnostics())[0],/Неповна/);
+ await source.refresh({...settings,hookMinVolumeUsd:50000});assert.match(request,/minVolume=50000/);assert.equal(source.signals({...settings,hookMinVolumeUsd:50000}).length,0);assert.match(Object.values(source.diagnostics())[0],/Неповна/);
 });
 
 test("volume scopes cannot reuse old authorization or accept below-threshold coins",async()=>{

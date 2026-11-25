@@ -235,7 +235,7 @@ export class Trading {
       formations: formations.map((signal) => ({
         ...signal, canEnter: signalAllowsEntry(signal, s, now) && (!this.sources || this.sources.allowsEntry(signal, s)),
       })),
-      scanner: { ...this.store.get<any>("scanner", {}), ...(this.sources ? { sourceErrors: this.sources.diagnostics(), sourceCounts: this.sources.counts(s), sourceCoverage: this.sources.coverage(s) } : {}) },
+      scanner: { ...this.store.get<any>("scanner", {}), ...(this.sources ? { sourceErrors: this.sources.diagnostics(s), sourceCounts: this.sources.counts(s), sourceCoverage: this.sources.coverage(s) } : {}) },
       logs: this.store.get<any[]>("logs", []),
       liveAllowed: this.liveAllowed,
       credentials: {
