@@ -4,10 +4,11 @@ import { formationIsVisible, signalAllowsEntry } from "./formationState";
 export const HOOK_FORMATION_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
 const MAX_AGE = 120_000;
 const REFRESH_MS = 45_000;
+const POLL_MS = 30_000;
 type Source = "regular" | "early";
 type Key = { exchange: Exchange; symbol: string; timeframe: string };
 type Row = { symbol: string; until: number; signal: Signal; blocked: boolean };
-type Snapshot = { rows: Map<string, Row>; checkedAt: number };
+type Snapshot = { rows: Map<string, Row>; checkedAt: number; receivedCoins: number; receivedPatterns: number };
 const TYPES: Record<string,string> = {
   double_top:"Double Top", double_bottom:"Double Bottom", asc_triangle:"Ascending Triangle",
   desc_triangle:"Descending Triangle", bull_flag:"Bull Flag", bear_flag:"Bear Flag",
@@ -128,7 +129,7 @@ export class HookFormationSources {
     if (existing) return existing;
     if (this.now() < (this.retryAt.get(key) ?? 0)) return Promise.resolve();
     const cached = this.snapshots.get(key);
-    if (cached && this.now() - cached.checkedAt < REFRESH_MS) return Promise.resolve();
+    if (cached && this.now() >= cached.checkedAt && this.now() - cached.checkedAt < POLL_MS) return Promise.resolve();
     const generation = this.generation;
     const job = (async () => {
       try {
@@ -149,7 +150,23 @@ export class HookFormationSources {
         }
         if (generation !== this.generation) return;
         const now = this.now();
-        this.snapshots.set(key, {rows:new Map(readHookCandidates(data,exchange,timeframe,source,now).map(r=>[r.signal.id,r])),checkedAt:now});
+        const candidates=readHookCandidates(data,exchange,timeframe,source,now);
+        const rows=new Map<string,Row>(), conflicting=new Set<string>();
+        for(const row of candidates) {
+          const id=row.signal.id, previous=rows.get(id);
+          if (previous && (!sameSignal(previous.signal,row.signal) || previous.blocked!==row.blocked)) {
+            conflicting.add(id); rows.delete(id);
+          } else if (!conflicting.has(id)) {
+            rows.set(id,previous ? {...row,until:Math.min(previous.until,row.until)} : row);
+          }
+        }
+        if (conflicting.size) throw new Error("Суперечливі дублікати формацій h00k");
+        const list=data as any[];
+        const receivedPatterns=list.reduce((sum,coin)=>{
+          const patterns=source==="regular"?coin?.formations:coin?.earlyFormations;
+          return sum+(Array.isArray(patterns)?patterns.length:0);
+        },0);
+        this.snapshots.set(key, {rows,checkedAt:now,receivedCoins:list.length,receivedPatterns});
         this.errors.delete(key);
         this.retryAt.delete(key);
       } catch (error) {
@@ -195,6 +212,21 @@ export class HookFormationSources {
     return this.activeRows(settings,"regular").some(row=>!row.blocked && sameSignal(signal,row.signal));
   }
   diagnostics() { return Object.fromEntries(this.errors); }
+  coverage(settings:Settings) {
+    const now=this.now();
+    return settings.timeframes.flatMap(timeframe=>(["regular","early"] as const).filter(source=>enabled(settings,source)).map(source=>{
+      const key=scope(settings.exchange,timeframe,source), snapshot=this.snapshots.get(key);
+      const supported=(HOOK_FORMATION_TIMEFRAMES as readonly string[]).includes(timeframe);
+      const active=!!snapshot && now>=snapshot.checkedAt && now-snapshot.checkedAt<REFRESH_MS;
+      const rows=active?[...snapshot!.rows.values()].filter(row=>row.until>now):[];
+      return {key,timeframe,source,supported,checkedAt:snapshot?.checkedAt??null,
+        refreshing:this.jobs.has(key),fresh:active,receivedCoins:snapshot?.receivedCoins??null,
+        receivedPatterns:snapshot?.receivedPatterns??null,validPatterns:rows.length,
+        visiblePatterns:rows.filter(row=>formationIsVisible(row.signal,settings,now)).length,
+        eligiblePatterns:rows.filter(row=>!row.blocked && signalAllowsEntry(row.signal,settings,now)).length,
+        error:supported?this.errors.get(key)??null:"Таймфрейм не підтримується джерелом h00k"};
+    }));
+  }
   counts(settings: Settings) {
     return Object.fromEntries((["regular","early"] as const).map(source=>[source,new Set(this.activeRows(settings,source).map(r=>r.symbol)).size]));
   }

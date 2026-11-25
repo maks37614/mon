@@ -831,3 +831,9 @@ test("live history rejects conflicting duplicate fills and preserves the actual 
   f.broker.closingTrades=async()=>[fill,fill];const restarted=new Trading(f.store,f.market,f.vault,f.broker,true);await restarted.monitor();
   assert.equal(restarted.snapshot().history.length,1);assert.equal(restarted.snapshot().history[0].reason,"MANUAL");
 });
+
+test("empty auto-entry cycles do not consume the interval before a signal arrives",async t=>{
+ const f=fixture(t,"paper");f.store.set("settings",{...f.trading.settings(),autoEntries:true});f.store.set("signals",[]);
+ await f.trading.monitor();assert.equal(f.store.get<any>("book:paper",{lastEntryAt:0}).lastEntryAt,0);
+ f.store.set("signals",[signal()]);await f.trading.monitor();assert.equal(f.trading.snapshot().positions.length,1);
+});

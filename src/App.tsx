@@ -1086,7 +1086,11 @@ export default function App() {
                       {scan.running ? "Обробка пакета" : "Очікування розкладу"}
                     </span>
                   </div>
-                  <div className="coverage-values">
+                  {scan.sourceCoverage ? <div className="coverage-values">
+                    <span><strong>{data.formations?.length ?? 0}</strong> формацій після фільтрів</span>
+                    <span><strong>{data.signals.length}</strong> дозволених сигналів</span>
+                    <span><strong>{scan.sourceCounts?.regular ?? 0}</strong> монет зі звичайними формаціями</span>
+                  </div> : <><div className="coverage-values">
                     <span>
                       <strong>{scan.symbols || "—"}</strong> активних контрактів
                     </span>
@@ -1109,7 +1113,15 @@ export default function App() {
                     Наступний індекс: {scan.cursor || 0} · до кінця проходу:{" "}
                     {remaining || "—"} · повний прохід:{" "}
                     {date(scan.lastFullPassAt)}
-                  </p>
+                  </p></>}
+                  {scan.sourceCoverage && <div>
+                    {scan.sourceCoverage.map((scope:any)=><p className="muted" key={scope.key}>
+                      {scope.timeframe} · {scope.source==="regular"?"Звичайні":"Ранні"} ·
+                      {scope.error ? " "+scope.error : scope.refreshing ? " оновлення" : scope.fresh ? " актуальні дані" : " немає свіжих даних"} ·
+                      отримано монет {scope.receivedCoins??"—"}, формацій {scope.receivedPatterns??"—"} · після перевірок {scope.validPatterns} · після фільтрів {scope.visiblePatterns} · допущено {scope.eligiblePatterns}
+                    </p>)}
+                    <p className="muted">Покриття залежить від API h00k.top; це не повний прохід усіх контрактів біржі.</p>
+                  </div>}
                 </div>
                 <div className="coverage-aside">
                   <span className="eyebrow">
@@ -1117,12 +1129,13 @@ export default function App() {
                       ? "ЗОВНІШНІЙ CRON"
                       : "ВНУТРІШНІЙ РОЗКЛАД"}
                   </span>
+                  {scan.sourceCoverage ? <strong>Джерело h00k.top · перевірка приблизно кожні 30 с</strong> : <>
                   <strong>{s.scanBatchSize} за пакет</strong>
                   <span className="muted">
                     Орієнтовний повний цикл:{" "}
                     {minutes ? `від ${minutes} хв` : "після завантаження ринку"}
                     . Фактичний час залежить від API та розкладу.
-                  </span>
+                  </span></>}
                   <span className="muted">
                     Останній запуск: {date(scan.lastStartedAt)}
                   </span>

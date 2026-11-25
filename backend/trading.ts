@@ -130,6 +130,8 @@ export class Trading {
     return this.mutex.run(async () => {
       const previous = this.settings(),
         next = validateSettings(input, previous);
+      if (this.sources && next.timeframes.includes("30m") && !previous.timeframes.includes("30m"))
+        throw new Error("Джерело h00k.top не підтримує формації 30m");
       if (
         (next.exchange !== previous.exchange ||
           next.mode !== previous.mode ||
@@ -233,7 +235,7 @@ export class Trading {
       formations: formations.map((signal) => ({
         ...signal, canEnter: signalAllowsEntry(signal, s, now) && (!this.sources || this.sources.allowsEntry(signal, s)),
       })),
-      scanner: { ...this.store.get<any>("scanner", {}), ...(this.sources ? { sourceErrors: this.sources.diagnostics(), sourceCounts: this.sources.counts(s) } : {}) },
+      scanner: { ...this.store.get<any>("scanner", {}), ...(this.sources ? { sourceErrors: this.sources.diagnostics(), sourceCounts: this.sources.counts(s), sourceCoverage: this.sources.coverage(s) } : {}) },
       logs: this.store.get<any[]>("logs", []),
       liveAllowed: this.liveAllowed,
       credentials: {
@@ -301,17 +303,19 @@ export class Trading {
             s.autoEntries &&
             tradingScheduleState(s.tradingSchedule).allowed &&
             !b.pending.length &&
+            b.positions.length < s.maxPositions &&
+            b.positions.every(p=>p.status==="active") &&
             Date.now() - b.lastEntryAt >= s.entryIntervalSeconds * 1000
           ) {
-            b.lastEntryAt = Date.now();
-            this.save(s.mode, b);
             const signals = this.snapshot()
               .signals.filter(
                 (signal) =>
                   !b.used[signal.id] &&
                   !b.positions.some((p) => p.symbol === signal.symbol),
               )
-              .sort((a, z) => z.confidence - a.confidence);
+              .sort((a, z) => z.confidence - a.confidence || z.candleAt-a.candleAt);
+            if (!signals.length) return; // Do not consume an entry interval while the source is empty.
+            b.lastEntryAt = Date.now();
             const maxAttempts = Math.min(
               signals.length,
               Math.max(10, s.maxPositions * 2),

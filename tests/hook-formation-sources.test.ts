@@ -56,3 +56,15 @@ test("disabling confirmation never revives a stopped, expired or flow-blocked pl
     assert.ok(source.signals(s)[0]);assert.equal(source.allowsEntry(source.signals(s)[0],s),false);
   }
 });
+
+test("source coverage distinguishes received, filtered, eligible and expired patterns",async()=>{
+ let clock=now,requests=0;const source=new HookFormationSources((async()=>{requests++;return Response.json({success:true,data:[coin]});}) as typeof fetch,()=>clock);
+ await source.refresh(settings);let c=source.coverage(settings)[0];assert.equal(c.receivedCoins,1);assert.equal(c.validPatterns,1);assert.equal(c.eligiblePatterns,1);
+ assert.equal(source.coverage({...settings,minScore:95})[0].visiblePatterns,0);
+ clock+=30000;await source.refresh(settings);assert.equal(requests,2);
+ clock+=45000;assert.equal(source.coverage(settings)[0].fresh,false);assert.equal(source.coverage(settings)[0].eligiblePatterns,0);
+});
+test("conflicting duplicate source identity fails closed",async()=>{
+ const other={...pattern,validation:{...validation,passed:false}};const source=new HookFormationSources((async()=>Response.json({success:true,data:[{...coin,formations:[pattern,other]}]})) as typeof fetch,()=>now);
+ await source.refresh(settings);assert.equal(source.signals(settings).length,0);assert.match(Object.values(source.diagnostics())[0],/дублікати/);
+});
