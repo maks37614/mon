@@ -309,7 +309,10 @@ export class Trading {
               try {
                 await this.enterLocked(signal, true);
               } catch (error) {
-                const reason = error instanceof Error ? error.message.slice(0,180) : "Вхід відхилено";
+                const message = error instanceof Error ? error.message : "";
+                // Do not expose raw exchange request URLs, signatures, API keys or response bodies.
+                const reason = /^[А-Яа-яІіЇїЄєҐґ]/u.test(message) && !/https?:|api.?key|signature|secret|[{}]/i.test(message)
+                  ? message.slice(0,180) : exchangeError(error);
                 const key = signal.exchange + ":" + signal.symbol + ":" + reason;
                 const at = Date.now();
                 if (at - (this.rejectedEntries.get(key) || 0) >= 60_000) {
