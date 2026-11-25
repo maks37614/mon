@@ -821,3 +821,13 @@ test("credential replacement waits for verification and never inherits the old k
   assert.equal(f.vault.load("binance")!.apiKey,"old-key");release();await verification;await replacement;
   assert.equal(f.vault.load("binance")!.apiKey,"new-key");assert.equal(f.vault.status("binance").verified,false);
 });
+
+test("live history rejects conflicting duplicate fills and preserves the actual close reason",async t=>{
+  const f=fixture(t,"live");await f.trading.enter("signal-1");const p=f.trading.snapshot().positions[0];
+  await f.trading.closePosition(p.id);
+  const fill={id:"close-duplicate",side:"sell",quantity:p.quantity,price:101,fee:0.01,at:Date.now()};
+  f.broker.closingTrades=async()=>[fill,{...fill,price:102}];await f.trading.monitor();
+  assert.equal(f.trading.snapshot().history.length,0);assert.equal(f.trading.snapshot().positions.length,1);
+  f.broker.closingTrades=async()=>[fill,fill];const restarted=new Trading(f.store,f.market,f.vault,f.broker,true);await restarted.monitor();
+  assert.equal(restarted.snapshot().history.length,1);assert.equal(restarted.snapshot().history[0].reason,"MANUAL");
+});

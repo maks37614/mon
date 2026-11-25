@@ -409,6 +409,11 @@ export class ExchangeGateway {
     const c = await this.client(exchange),
       symbol = this.symbol(c, symbolId);
     const trades = await c.fetchMyTrades(symbol, since - 1000, 1000);
+    if (!Array.isArray(trades) || trades.length >= 1000)
+      throw new Error("Історія виконань неповна; потрібна додаткова звірка");
+    if (trades.some((t:any)=>!t || t.id == null || String(t.id)==="" ||
+      !Number.isFinite(t.timestamp) || (t.symbol && t.symbol!==symbol)))
+      throw new Error("Некоректна історія виконань");
     const fills = trades.filter((t: any) => t.timestamp >= since - 1000);
     return fills.map((t: any) => ({
       id: String(t.id),
@@ -416,8 +421,8 @@ export class ExchangeGateway {
       side: t.side,
       quantity: Number(t.amount) * Number(c.market(symbol).contractSize || 1),
       price: Number(t.price),
-      fee: t.fee?.currency === "USDT" ? Number(t.fee.cost || 0) : 0,
-      feeKnown: t.fee?.currency === "USDT",
+      fee: t.fee?.currency === "USDT" && t.fee.cost != null && Number.isFinite(Number(t.fee.cost)) ? Number(t.fee.cost) : 0,
+      feeKnown: t.fee?.currency === "USDT" && t.fee.cost != null && Number.isFinite(Number(t.fee.cost)),
       at: t.timestamp,
     }));
   }

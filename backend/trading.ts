@@ -42,6 +42,7 @@ export type Position = {
   expiresAt: number;
   entryFee: number;
   entryOrderId?: string;
+  closeReason?: string;
   intent: Intent;
   guards: string[];
   status: "active" | "protecting" | "closing" | "reconciling";
@@ -891,6 +892,7 @@ export class Trading {
       orderId: undefined,
     };
     p.status = "closing";
+    p.closeReason ||= reason;
     b.pending.push(intent);
     this.save("live", b);
     try {
@@ -930,13 +932,27 @@ export class Trading {
       p.openedAt,
       p.direction,
     );
-    const unique = [
-      ...new Map(
-        trades
-          .filter((t) => t.side === (p.direction === "LONG" ? "sell" : "buy"))
-          .map((t) => [t.id, t]),
-      ).values(),
-    ];
+    const validTrade = (t: typeof trades[number]) => typeof t.id === "string" && t.id.length > 0 &&
+      ["buy","sell"].includes(t.side) && Number.isFinite(t.quantity) && t.quantity > 0 &&
+      Number.isFinite(t.price) && t.price > 0 && Number.isFinite(t.fee) &&
+      Number.isFinite(t.at) && t.at >= p.openedAt-1000 && t.at <= Date.now()+5000;
+    if (!Array.isArray(trades) || trades.some(t=>!t || !validTrade(t))) {
+      this.pause(`${p.symbol}: некоректна історія виконань, P&L очікує звірки`);
+      return;
+    }
+    const byId = new Map<string, typeof trades[number]>();
+    for (const trade of trades) {
+      const previous=byId.get(trade.id);
+      if (previous && (previous.quantity!==trade.quantity || previous.price!==trade.price ||
+          previous.side!==trade.side || previous.at!==trade.at || previous.orderId!==trade.orderId ||
+          previous.fee!==trade.fee || previous.feeKnown!==trade.feeKnown)) {
+        this.pause(`${p.symbol}: суперечливі дублікати виконань, P&L очікує звірки`);
+        return;
+      }
+      byId.set(trade.id,trade);
+    }
+    const allFills=[...byId.values()];
+    const unique=allFills.filter(t=>t.side===(p.direction==="LONG"?"sell":"buy") && t.at>=p.openedAt);
     const total = unique.reduce((sum, t) => sum + t.quantity, 0);
     if (!sameQuantity(total, p.originalQuantity)) {
       this.pause(
@@ -946,7 +962,8 @@ export class Trading {
     }
     const exit =
       unique.reduce((sum, t) => sum + t.price * t.quantity, 0) / total;
-    const entryFills = trades.filter((t) => t.orderId === p.entryOrderId);
+    const entryFills = allFills.filter(t=>p.entryOrderId && t.orderId===p.entryOrderId &&
+      t.side===(p.direction==="LONG"?"buy":"sell"));
     const entryFee = entryFills.length
       ? entryFills.reduce((sum, t) => sum + t.fee, 0)
       : p.entryFee;
@@ -982,7 +999,7 @@ export class Trading {
       reason,
       estimated: false,
       feesComplete:
-        entryFills.length > 0 &&
+        entryFills.length > 0 && sameQuantity(entryFills.reduce((sum,t)=>sum+t.quantity,0),p.originalQuantity) &&
         [...entryFills, ...unique].every((t) => t.feeKnown),
     });
     b.history = b.history.slice(0, 1000);
@@ -1040,7 +1057,7 @@ export class Trading {
           : account;
       const venue = fresh.positions.find((x) => x.symbol === p.symbol);
       if (!venue) {
-        await this.finishLive(b, p, "EXCHANGE");
+        await this.finishLive(b, p, p.closeReason || "EXCHANGE");
         continue;
       }
       if (
@@ -1077,7 +1094,7 @@ export class Trading {
         await this.closeLive(
           b,
           p,
-          p.status === "closing" ? "MANUAL" : "TIME",
+          p.status === "closing" ? p.closeReason || "MANUAL" : "TIME",
           s,
         );
     }
