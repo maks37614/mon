@@ -338,6 +338,7 @@ export class Trading {
             for (const p of [...b.positions]) {
               try { await this.monitorPaper(b, p); }
               catch (e: any) {
+                this.paperGaps.add(`${p.exchange}:${p.symbol}`);
                 if (p.paper && !p.paper.warnings.includes("data-unavailable")) p.paper.warnings.push("data-unavailable");
                 if (Date.now() - (this.paperErrorLog.get(p.id) || 0) >= 60000) {
                   this.paperErrorLog.set(p.id, Date.now());
@@ -840,10 +841,11 @@ export class Trading {
       return;
     }
     if (Date.now() - state.lastObservedAt > 15000 && !state.warnings.includes("monitoring-gap")) state.warnings.push("monitoring-gap");
-    if (this.paperGaps.delete(key) && !state.warnings.includes("stream-gap")) state.warnings.push("stream-gap");
+    if (this.paperGaps.has(key) && !state.warnings.includes("stream-gap")) state.warnings.push("stream-gap");
     let last = tick?.last, mark = tick?.mark;
-    if (!this.running || !last || !mark || Date.now() - (tick?.markAt || 0) > 5000 || Date.now() - (tick?.lastAt || 0) > 15000) {
+    if (!this.running || this.paperGaps.has(key) || !last || !mark || Date.now() - (tick?.markAt || 0) > 5000 || Date.now() - (tick?.lastAt || 0) > 15000) {
       const current = await this.market.getContractState(p.exchange, p.symbol); this.checkContractState(current);
+      this.paperGaps.delete(key);
       last = current.last; mark = current.mark;
       state.nextFundingAt = Math.min(state.nextFundingAt, current.nextFundingAt);
       state.lastMarkAt = state.lastTradeAt = current.at;

@@ -361,3 +361,15 @@ test("stale paper monitoring blocks additional entries without removing position
  assert.ok(f.trading.snapshot().formations?.some(x=>x.entryReasons.includes("Очікування актуальних цін відкритих позицій")));
  assert.equal(f.trading.snapshot().positions.length,1);
 });
+
+test("a failed paper price refresh immediately blocks new entry until recovery",async t=>{
+ const f=fixture(t);await f.trading.enter("signal");
+ const read=f.market.getContractState;
+ f.market.getContractState=async()=>{throw Error("offline")};
+ await f.trading.monitor();
+ assert.ok(f.trading.snapshot().formations?.some(x=>x.entryReasons.includes("Очікування актуальних цін відкритих позицій")));
+ f.market.getContractState=read;
+ await f.trading.monitor();
+ assert.ok(!f.trading.snapshot().formations?.some(x=>x.entryReasons.includes("Очікування актуальних цін відкритих позицій")));
+ assert.equal(f.trading.snapshot().positions.length,1);
+});
