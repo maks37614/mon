@@ -202,7 +202,7 @@ export function createApplication(options: Options) {
         req.body.liveAcknowledged !== true
       )
         throw new Error("Підтвердьте реальний ордер");
-      await trading.enter(String(req.params.id), trading.settings().mode, req.body?.liveAcknowledged === true);
+      await trading.enter(String(req.params.id), trading.settings().mode, req.body?.liveAcknowledged === true, req.body?.expectedDirection);
       res.json({ ok: true });
     }),
   );

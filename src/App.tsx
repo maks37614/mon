@@ -819,6 +819,7 @@ export default function App() {
         Math.max(60, s.scanIntervalSeconds)) /
       60
     : 0;
+  const orderDirection=(signal:Signal)=>s.reverseEnabled?(signal.direction==="LONG"?"SHORT":"LONG"):signal.direction;
   const confirmLive = (text: string) =>
     !live ||
     confirm(
@@ -1447,6 +1448,7 @@ export default function App() {
                               >
                                 {signal.direction}
                               </span>
+                              {s.reverseEnabled && <small>Реверс: {orderDirection(signal)}</small>}
                             </td>
                             <td>{price(signal.entryPrice)}</td>
                             <td>
@@ -1475,13 +1477,14 @@ export default function App() {
                                 onClick={() => {
                                   if (
                                     confirmLive(
-                                      `Відкрити ${signal.symbol} ${signal.direction} на ${s.orderNotionalUsdt} USDT?`,
+                                      `Відкрити ${signal.symbol} ${orderDirection(signal)} на ${s.orderNotionalUsdt} USDT?${s.reverseEnabled?" (реверс)":""}`,
                                     )
                                   )
                                     void run(
                                       () =>
                                         api(`/api/signals/${encodeURIComponent(signal.id)}/enter`, {
                                           liveAcknowledged: live,
+                                          expectedDirection:orderDirection(signal),
                                         }),
                                       "Запит входу опрацьовано",
                                     );

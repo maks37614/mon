@@ -353,3 +353,11 @@ test("latched websocket crossing closes without fresh REST ticker",async t=>{
  assert.equal(f.trading.snapshot().positions.length,0);
  assert.equal(f.trading.snapshot().history[0].reason,"SL");
 });
+
+test("stale paper monitoring blocks additional entries without removing positions",async t=>{
+ const f=fixture(t);await f.trading.enter("signal");
+ const b=f.store.get<any>("book:paper",null);b.positions[0].paper.lastObservedAt=Date.now()-16000;
+ f.store.set("book:paper",b);
+ assert.ok(f.trading.snapshot().formations?.some(x=>x.entryReasons.includes("Очікування актуальних цін відкритих позицій")));
+ assert.equal(f.trading.snapshot().positions.length,1);
+});

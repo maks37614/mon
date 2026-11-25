@@ -131,6 +131,11 @@ export class Trading {
     const b = this.book("live");
     return !!(b.positions.length || b.pending.length);
   }
+  private paperMonitoringReady(b:Book,mode:Mode) {
+    return mode!=="paper" || b.positions.every(p=>p.paper && !p.paper.closeTrigger &&
+      Number.isFinite(p.paper.lastObservedAt) && Date.now()-p.paper.lastObservedAt<=15_000 &&
+      !this.paperGaps.has(`${p.exchange}:${p.symbol}`));
+  }
   private protectionReady(b:Book,mode:Mode) {
     return mode!=="live" || b.positions.every(p=>p.status!=="active" ||
       (p.protectionCheck?.status==="verified" && Date.now()-p.protectionCheck.at<90_000));
@@ -230,6 +235,7 @@ export class Trading {
       :b.pending.length?"Очікування узгодження ордерів"
       :b.positions.some(p=>p.status!=="active")?"Позиції потребують узгодження"
       :!this.protectionReady(b,s.mode)?"Захист відкритої позиції потребує перевірки"
+      :!this.paperMonitoringReady(b,s.mode)?"Симуляція очікує актуальних цін відкритих позицій"
       :b.positions.length>=s.maxPositions?"Досягнуто ліміт позицій"
       :now-b.lastEntryAt<s.entryIntervalSeconds*1000?"Інтервал між циклами входу"
       :null;
@@ -271,6 +277,7 @@ export class Trading {
         if(b.positions.length>=s.maxPositions) reasons.push("Досягнуто ліміт позицій");
         if(b.pending.length || b.positions.some(p=>p.status!=="active")) reasons.push("Очікування узгодження ордерів");
         if(!this.protectionReady(b,s.mode)) reasons.push("Захист відкритої позиції не підтверджено");
+        if(!this.paperMonitoringReady(b,s.mode)) reasons.push("Очікування актуальних цін відкритих позицій");
         if(now-(b.lastEntries[signal.symbol]||0)<s.entryCooldownSeconds*1000) reasons.push("Пауза повторного входу");
         if(s.mode==="live" && (!this.liveAllowed || !this.vault.status(s.exchange).verified)) reasons.push("Реальний режим або API не дозволено");
         const last=this.autoDecisions.get(signal.id);
@@ -348,6 +355,7 @@ export class Trading {
             b.positions.length < s.maxPositions &&
             b.positions.every(p=>p.status==="active") &&
             this.protectionReady(b,s.mode) &&
+            this.paperMonitoringReady(b,s.mode) &&
             Date.now() - b.lastEntryAt >= s.entryIntervalSeconds * 1000
           ) {
             const signals = this.snapshot()
@@ -366,9 +374,8 @@ export class Trading {
             );
             const cursor =
               (b.candidateCursor || 0) % Math.max(1, signals.length);
-            b.candidateCursor =
-              (cursor + maxAttempts) % Math.max(1, signals.length);
-            this.save(s.mode, b);
+            b.candidateCursor=cursor;
+            this.save(s.mode,b);
             const cycleStarted=Date.now();
             for (let candidate = 0; candidate < maxAttempts; candidate++) {
               const signal = signals[(cursor + candidate) % signals.length];
@@ -381,6 +388,10 @@ export class Trading {
                 !tradingScheduleState(this.settings().tradingSchedule).allowed
               )
                 break;
+              // Persist only the candidates actually attempted, not the entire planned batch.
+              const nextBook=this.book(s.mode);
+              nextBook.candidateCursor=(cursor+candidate+1)%signals.length;
+              this.save(s.mode,nextBook);
               try {
                 await this.enterLocked(signal, true);
                 const current=this.book(s.mode);
@@ -418,7 +429,7 @@ export class Trading {
         this.monitoring = false;
       });
   }
-  enter(signalId: string, expectedMode?: Mode, liveAcknowledged = false) {
+  enter(signalId: string, expectedMode?: Mode, liveAcknowledged = false, expectedDirection?: unknown) {
     return this.mutex.run(async () => {
       const mode=this.settings().mode;
       if (expectedMode !== undefined && (mode !== expectedMode || (mode==="live" && !liveAcknowledged)))
@@ -426,6 +437,9 @@ export class Trading {
       const signal = (this.sources ? this.sources.signals(this.settings()) : this.store.get<Signal[]>("signals", []))
         .find((x) => x.id === signalId);
       if (!signal) throw new Error("Сигнал відсутній або вже застарів");
+      const direction=this.settings().reverseEnabled?(signal.direction==="LONG"?"SHORT":"LONG"):signal.direction;
+      if(expectedDirection!==undefined && expectedDirection!==direction)
+        throw new Error("Напрямок ордера змінився; перевірте реверсний режим і повторіть підтвердження");
       await this.enterLocked(signal, false);
     });
   }
@@ -452,7 +466,7 @@ export class Trading {
       signal.candleAt > now + 2000
     )
       throw new Error("Сигнал застарів");
-    if (b.pending.length || b.positions.some((p) => p.status !== "active") || !this.protectionReady(b,s.mode))
+    if (b.pending.length || b.positions.some((p) => p.status !== "active") || !this.protectionReady(b,s.mode) || !this.paperMonitoringReady(b,s.mode))
       throw new Error("Спочатку потрібно узгодити ордери або захисні рівні");
     if (
       b.positions.length >= s.maxPositions ||
@@ -565,6 +579,8 @@ export class Trading {
     if (automatic && (this.entryPauseRequested || !this.settings().autoEntries || !tradingScheduleState(s.tradingSchedule).allowed))
       throw new Error("Автоматичний вхід призупинено або торгова сесія завершилася під час підготовки");
     if (this.sources && !this.sources.allowsEntry(signal, this.settings())) throw new Error("Формація h00k більше не актуальна; вхід скасовано");
+    if(!this.paperMonitoringReady(b,s.mode) || !this.protectionReady(b,s.mode))
+      throw new Error("Стан відкритих позицій потребує повторної перевірки");
     const intent: Intent = {
       id: orderId(),
       exchange: s.exchange,
@@ -860,8 +876,9 @@ export class Trading {
     const state = p.paper!;
     if (!state.closeTrigger) {
       state.closeTrigger = { reason, at: Date.now(), reference };
-      this.save("paper", b); // Persist the first trigger before any network request or latency.
     }
+    p.status="closing";
+    this.save("paper",b); // Persist the first trigger before any network request or latency.
     reason = state.closeTrigger.reason; reference = state.closeTrigger.reference;
     if (!state.closeFill) {
       if (state.latencyMs) await new Promise(resolve => setTimeout(resolve, state.latencyMs));

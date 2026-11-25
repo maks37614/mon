@@ -915,3 +915,11 @@ test("pause requested during an automatic quote read prevents order submission",
   assert.equal(f.trading.snapshot().positions.length,0);
   assert.equal(f.trading.settings().autoEntries,false);
 });
+
+test("manual confirmation rejects a changed reverse direction",async t=>{
+ const f=fixture(t,"paper");await f.trading.updateSettings({reverseEnabled:true});
+ await assert.rejects(f.trading.enter("signal-1","paper",false,"LONG"),/Напрямок/);
+ assert.equal(f.trading.snapshot().positions.length,0);
+ await f.trading.enter("signal-1","paper",false,"SHORT");
+ assert.equal(f.trading.snapshot().positions[0].direction,"SHORT");
+});
