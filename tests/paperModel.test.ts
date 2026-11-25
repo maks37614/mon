@@ -300,3 +300,9 @@ test("private paper-data errors redact exchange messages before they reach the u
   }));
   await assert.rejects(gateway.takerRate("binance", "BTCUSDT"), { message: "Біржа: AuthenticationError" });
 });
+
+test("non-finite simulated order quantities cannot produce a fill",()=>{
+  const book={at:Date.now(),bids:[[99,10]],asks:[[101,10]]};
+  assert.throws(()=>depthFill(book,"buy",Infinity),/Некоректний/);
+  assert.throws(()=>depthFill(book,"sell",NaN),/Некоректний/);
+});

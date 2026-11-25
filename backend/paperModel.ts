@@ -31,7 +31,7 @@ export function depthFill(book: ExecutionBook, side: "buy" | "sell", quantity: n
       (i > 0 && (ascending ? p <= levels[i - 1][0] : p >= levels[i - 1][0]))))
       throw new Error("Некоректна глибина стакана");
   }
-  if (bids[0][0] >= asks[0][0] || !(quantity > 0)) throw new Error("Некоректний стакан або обсяг");
+  if (bids[0][0] >= asks[0][0] || !Number.isFinite(quantity) || !(quantity > 0)) throw new Error("Некоректний стакан або обсяг");
   let remaining = quantity, notional = 0;
   for (const [price, available] of side === "buy" ? asks : bids) {
     const filled = Math.min(remaining, available);
@@ -39,7 +39,9 @@ export function depthFill(book: ExecutionBook, side: "buy" | "sell", quantity: n
     if (remaining <= quantity * 1e-10) break;
   }
   if (remaining > quantity * 1e-10) throw new Error("Недостатня видима ліквідність для повного виконання");
-  return notional / quantity;
+  const price = notional / quantity;
+  if (!Number.isFinite(price) || price <= 0) throw new Error("Некоректна ціна виконання");
+  return price;
 }
 export function maintenance(tiers: RiskTier[], notional: number) {
   const tier = tiers.find(t => notional <= t.cap);

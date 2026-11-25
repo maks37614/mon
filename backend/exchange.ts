@@ -160,6 +160,19 @@ export class ExchangeGateway {
       client.fetchBalance({ type: "swap" }),
       client.fetchPositions(undefined, { settleCoin: "USDT" }),
     ]);
+    // Never interpret an incomplete account response as a flat account.
+    if (!Array.isArray(positions) || !balance?.USDT ||
+      balance.USDT.free == null || balance.USDT.total == null ||
+      !Number.isFinite(Number(balance.USDT.free)) || !Number.isFinite(Number(balance.USDT.total)))
+      throw new Error("Неповна відповідь балансу або позицій біржі");
+    if (positions.some((p: any) => !p || p.contracts == null ||
+      !Number.isFinite(Number(p.contracts)) || Number(p.contracts) < 0 ||
+      (Number(p.contracts) > 0 && (!["long","short"].includes(p.side) ||
+        !Number.isFinite(Number(p.contractSize ?? 1)) || Number(p.contractSize ?? 1) <= 0 ||
+        !Number.isFinite(Number(p.entryPrice)) || Number(p.entryPrice) <= 0 ||
+        !Number.isFinite(Number(p.markPrice || p.lastPrice || p.entryPrice)) ||
+        Number(p.markPrice || p.lastPrice || p.entryPrice) <= 0))))
+      throw new Error("Некоректні дані відкритої позиції біржі");
     if (
       positions.some(
         (p: any) => p.hedged === true || Number(p.info?.positionIdx || 0) !== 0,
@@ -334,8 +347,7 @@ export class ExchangeGateway {
         );
       if (
         !existing.id ||
-        existing.status === "rejected" ||
-        existing.status === "canceled"
+        existing.status !== "open"
       )
         throw new Error("Захисний ордер не підтверджено");
       onSaved(String(existing.id), type);

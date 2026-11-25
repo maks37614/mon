@@ -534,7 +534,7 @@ export class Trading {
       if (fill.id) intent.orderId = fill.id;
       this.save("live", b);
       if (
-        ["closed", "canceled"].includes(fill.status) &&
+        ["closed", "canceled", "expired", "rejected"].includes(fill.status) &&
         fill.filled > 0 &&
         fill.average > 0
       )
@@ -756,7 +756,10 @@ export class Trading {
   }
   private async finishPaper(b: Book, p: Position, reference: number, reason: string) {
     const state = p.paper!;
-    state.closeTrigger ||= { reason, at: Date.now(), reference };
+    if (!state.closeTrigger) {
+      state.closeTrigger = { reason, at: Date.now(), reference };
+      this.save("paper", b); // Persist the first trigger before any network request or latency.
+    }
     reason = state.closeTrigger.reason; reference = state.closeTrigger.reference;
     if (!state.closeFill) {
       if (state.latencyMs) await new Promise(resolve => setTimeout(resolve, state.latencyMs));
@@ -768,6 +771,8 @@ export class Trading {
         const book = await this.market.getExecutionBook(p.exchange, p.symbol);
         price = depthFill(book, p.direction === "LONG" ? "sell" : "buy", p.originalQuantity);
       }
+      if (!Number.isFinite(price) || price < 0 || (reason !== "LIQUIDATION" && price === 0))
+        throw new Error("Некоректна розрахункова ціна закриття");
       state.closeFill = { price, at: Date.now(), reference, reason,
         slippage: reason === "LIQUIDATION" ? 0 : (reference - price) * p.quantity * (p.direction === "LONG" ? 1 : -1) };
       if (Math.abs(state.closeFill.at - state.nextFundingAt) <= 5000 && !state.warnings.includes("funding-boundary-estimate")) state.warnings.push("funding-boundary-estimate");
@@ -861,11 +866,17 @@ export class Trading {
       intent.orderId = fill.id || undefined;
       this.save("live", b);
       // Acknowledgement, including a filled market response, is not proof that the position is now flat.
-      if (["closed", "canceled", "rejected"].includes(fill.status))
+      if (["closed", "canceled", "rejected", "expired"].includes(fill.status))
         b.pending = b.pending.filter((x) => x.id !== intent.id);
       this.save("live", b);
     } catch (e: any) {
-      intent.error = "Закриття очікує звірки з біржею";
+      if (definitiveRejection(e)) {
+        // The exchange explicitly rejected this request; there is no unknown fill to reconcile.
+        // A later cycle may retry only after fetching the actual remaining position.
+        b.pending = b.pending.filter(x=>x.id!==intent.id);
+      } else {
+        intent.error = "Закриття очікує звірки з біржею";
+      }
       this.pause(
         `${p.symbol}: ${exchangeError(e)} під час закриття; позицію не позначено закритою`,
       );
@@ -969,7 +980,7 @@ export class Trading {
       if (!fill) continue; // Unknown submissions are never blindly repeated.
       if (intent.kind === "entry") {
         if (
-          ["closed", "canceled"].includes(fill.status) &&
+          ["closed", "canceled", "expired", "rejected"].includes(fill.status) &&
           fill.filled > 0 &&
           fill.average > 0
         ) {

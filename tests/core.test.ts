@@ -791,3 +791,22 @@ test("HTTP authentication, CSRF, secret redaction and cron authorization protect
   assert.ok(runtime.store.get<any>("scanner", {}).lastCronAt > 0);
   assert.equal(runtime.store.get<any>("scanner", {}).lastTrigger, "cron");
 });
+
+test("explicit close rejection does not leave a phantom pending order; unknown close does",async t=>{
+  const f=fixture(t,"live"); await f.trading.enter("signal-1");
+  const id=f.trading.snapshot().positions[0].id;
+  const submit=f.broker.submit; let rejected=0;
+  f.broker.submit=async(intent:any)=>{if(intent.kind==="close" && rejected++===0)throw Object.assign(new Error("rejected"),{name:"InvalidOrder"});return submit(intent);};
+  await f.trading.closePosition(id);
+  assert.equal(f.trading.snapshot().pending.length,0);assert.equal(f.trading.snapshot().positions.length,1);
+  await f.trading.monitor();assert.equal(f.broker.positions.length,0);
+});
+test("exchange account rejects malformed active positions or missing wallet instead of treating them as flat",async t=>{
+  const {store}=storage(t),vault=new Vault(store,randomBytes(32).toString("base64"));vault.save("binance","fixture","fixture");
+  let balance:any={USDT:{free:100,total:100}},positions:any=[];
+  const client:any={loadMarkets:async()=>{},fetchBalance:async()=>balance,fetchPositions:async()=>positions};
+  const gateway=new ExchangeGateway(vault,async()=>client);
+  assert.equal((await gateway.account("binance")).positions.length,0);
+  balance={};await assert.rejects(gateway.account("binance"),/Неповна/);
+  balance={USDT:{free:100,total:100}};positions=[{contracts:1,side:"unknown",entryPrice:100}];await assert.rejects(gateway.account("binance"),/Некоректні/);
+});
