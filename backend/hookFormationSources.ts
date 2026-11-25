@@ -8,7 +8,7 @@ const POLL_MS = 30_000;
 type Source = "regular" | "early";
 type Key = { exchange: Exchange; symbol: string; timeframe: string };
 type Row = { symbol: string; until: number; signal: Signal; blocked: boolean };
-type Snapshot = { rows: Map<string, Row>; checkedAt: number; receivedCoins: number; receivedPatterns: number };
+type Snapshot = { rows: Map<string, Row>; checkedAt: number; receivedCoins: number; receivedPatterns: number; responseMs: number };
 const TYPES: Record<string,string> = {
   double_top:"Double Top", double_bottom:"Double Bottom", asc_triangle:"Ascending Triangle",
   desc_triangle:"Descending Triangle", bull_flag:"Bull Flag", bear_flag:"Bear Flag",
@@ -23,18 +23,19 @@ const sameSignal = (a: Signal,b: Signal) =>
   a.timeframe === b.timeframe && a.formation === b.formation && a.direction === b.direction &&
   a.status === b.status && a.confidence === b.confidence && a.entryPrice === b.entryPrice &&
   a.stopLoss === b.stopLoss && a.takeProfit === b.takeProfit && a.candleAt === b.candleAt;
-const scope = (exchange: Exchange, timeframe: string, source: Source) => [exchange, timeframe, source].join(":");
+const scope = (exchange: Exchange, timeframe: string, source: Source, minVolumeUsd: number) => [exchange, timeframe, source, minVolumeUsd].join(":");
 const enabled = (settings: Settings, source: Source) => source === "regular" ? settings.hookRegularFormations !== false : settings.hookEarlyFormations === true;
 const fresh = (at: unknown, now: number): at is number => typeof at === "number" && Number.isFinite(at) && at <= now + 2000 && now - at <= MAX_AGE;
 
 /** Do not infer eligibility from a ticker, a spot pair, or an unformed result. */
-export function readHookCandidates(data: unknown, exchange: Exchange, timeframe: string, source: Source, now = Date.now()): Row[] {
+export function readHookCandidates(data: unknown, exchange: Exchange, timeframe: string, source: Source, now = Date.now(), minVolumeUsd = 0): Row[] {
   if (!Array.isArray(data)) throw new Error("Некоректний список формацій h00k");
   const rows: Row[] = [];
   for (const coin of data) {
     if (!coin || coin.exchange !== exchange || coin.marketType !== "futures" || coin.timeframe !== timeframe ||
         coin.quoteAsset !== "USDT" || typeof coin.symbol !== "string" || !/^[A-Z0-9]{1,30}USDT$/.test(coin.symbol) ||
-        !fresh(coin.lastUpdated, now) || !Number.isFinite(coin.currentPrice) || coin.currentPrice <= 0) continue;
+        !fresh(coin.lastUpdated, now) || !Number.isFinite(coin.currentPrice) || coin.currentPrice <= 0 ||
+        (minVolumeUsd > 0 && (!Number.isFinite(coin.volume24hUsd) || coin.volume24hUsd < minVolumeUsd))) continue;
     const proof = coin.formationData;
     const interval = tfMs(timeframe);
     if (!interval || proof?.contiguous !== true || !fresh(proof.collectedAt, now) ||
@@ -58,7 +59,7 @@ export function readHookCandidates(data: unknown, exchange: Exchange, timeframe:
       // Match the site's displayed "Вхід підтверджено" (validation.passed), not just a breakout label.
       const confirmed = !early && ["breakout","retest"].includes(sourceStatus) &&
         v.passed === true && v.confirmed === true && v.breakoutConfirmed === true &&
-        ["BREAKOUT","RETEST"].includes(v.entryMode);
+        v.entryMode === (sourceStatus === "retest" ? "RETEST" : "BREAKOUT");
       const entryPrice = early ? pattern.breakoutEntry : pattern.levels?.entryPrice;
       const stopLoss = early ? pattern.breakoutStopLoss : pattern.levels?.stopLossPrice;
       const takeProfit = early ? pattern.target : pattern.levels?.targetPrice;
@@ -129,7 +130,7 @@ export class HookFormationSources {
     return body;
   }
   private refreshScope(exchange: Exchange, timeframe: string, source: Source, minVolumeUsd:number) {
-    const key = scope(exchange, timeframe, source);
+    const key = scope(exchange, timeframe, source, minVolumeUsd);
     const existing = this.jobs.get(key);
     if (existing) return existing;
     if (this.now() < (this.retryAt.get(key) ?? 0)) return Promise.resolve();
@@ -138,6 +139,7 @@ export class HookFormationSources {
     const generation = this.generation;
     const job = (async () => {
       try {
+        const started=this.now();
         let data: unknown;
         if (source === "regular") {
           const query = new URLSearchParams({exchange, timeframe, marketType:"futures", minVolume:String(minVolumeUsd)});
@@ -167,7 +169,7 @@ export class HookFormationSources {
         }
         if (generation !== this.generation) return;
         const now = this.now();
-        const candidates=readHookCandidates(data,exchange,timeframe,source,now);
+        const candidates=readHookCandidates(data,exchange,timeframe,source,now,minVolumeUsd);
         const rows=new Map<string,Row>(), conflicting=new Set<string>();
         for(const row of candidates) {
           const id=row.signal.id, previous=rows.get(id);
@@ -183,7 +185,9 @@ export class HookFormationSources {
           const patterns=source==="regular"?coin?.formations:coin?.earlyFormations;
           return sum+(Array.isArray(patterns)?patterns.length:0);
         },0);
-        this.snapshots.set(key, {rows,checkedAt:now,receivedCoins:list.length,receivedPatterns});
+        this.snapshots.set(key, {rows,checkedAt:now,receivedCoins:list.length,receivedPatterns,responseMs:Math.max(0,now-started)});
+        // Bound the number of snapshots even when callers change filters without invalidating.
+        while (this.snapshots.size>24) this.snapshots.delete(this.snapshots.keys().next().value!);
         this.errors.delete(key);
         this.retryAt.delete(key);
       } catch (error) {
@@ -192,7 +196,9 @@ export class HookFormationSources {
         this.snapshots.delete(key);
         this.earlyJobs.delete(key);
         this.retryAt.set(key,this.now()+15_000);
-        this.errors.set(key, error instanceof Error ? error.message : "Джерело недоступне");
+        this.errors.set(key, error instanceof Error ? (error.name==="TimeoutError" || error.name==="AbortError" ? "Час очікування API h00k вичерпано" : error.message.slice(0,200)) : "Джерело недоступне");
+        while (this.errors.size>24) this.errors.delete(this.errors.keys().next().value!);
+        while (this.retryAt.size>24) this.retryAt.delete(this.retryAt.keys().next().value!);
       }
     })().finally(()=>{ if (generation === this.generation) this.jobs.delete(key); });
     this.jobs.set(key,job);
@@ -211,7 +217,7 @@ export class HookFormationSources {
     if (!enabled(settings,source)) return [];
     const now=this.now();
     return settings.timeframes.flatMap(tf=>{
-      const snapshot=this.snapshots.get(scope(settings.exchange,tf,source));
+      const snapshot=this.snapshots.get(scope(settings.exchange,tf,source,settings.hookMinVolumeUsd ?? 0));
       if (!snapshot || now < snapshot.checkedAt || now-snapshot.checkedAt >= REFRESH_MS) return [];
       return [...snapshot.rows.values()].filter(row=>row.until>now);
     });
@@ -229,15 +235,15 @@ export class HookFormationSources {
     if (signal.source !== "hook_regular" || !signalAllowsEntry(signal,settings,this.now())) return false;
     return this.activeRows(settings,"regular").some(row=>!row.blocked && sameSignal(signal,row.signal));
   }
-  diagnostics() { return Object.fromEntries(this.errors); }
+  diagnostics(settings?:Settings) { if(!settings) return Object.fromEntries(this.errors); const keys=new Set(settings.timeframes.flatMap(tf=>(["regular","early"] as const).filter(source=>enabled(settings,source)).map(source=>scope(settings.exchange,tf,source,settings.hookMinVolumeUsd??0)))); return Object.fromEntries([...this.errors].filter(([key])=>keys.has(key))); }
   coverage(settings:Settings) {
     const now=this.now();
     return settings.timeframes.flatMap(timeframe=>(["regular","early"] as const).filter(source=>enabled(settings,source)).map(source=>{
-      const key=scope(settings.exchange,timeframe,source), snapshot=this.snapshots.get(key);
+      const key=scope(settings.exchange,timeframe,source,settings.hookMinVolumeUsd ?? 0), snapshot=this.snapshots.get(key);
       const supported=(HOOK_FORMATION_TIMEFRAMES as readonly string[]).includes(timeframe);
       const active=!!snapshot && now>=snapshot.checkedAt && now-snapshot.checkedAt<REFRESH_MS;
       const rows=active?[...snapshot!.rows.values()].filter(row=>row.until>now):[];
-      return {key,timeframe,source,supported,checkedAt:snapshot?.checkedAt??null,
+      return {key,timeframe,source,supported,checkedAt:snapshot?.checkedAt??null,responseMs:snapshot?.responseMs??null,
         refreshing:this.jobs.has(key),fresh:active,receivedCoins:snapshot?.receivedCoins??null,
         receivedPatterns:snapshot?.receivedPatterns??null,validPatterns:rows.length,
         visiblePatterns:rows.filter(row=>formationIsVisible(row.signal,settings,now)).length,

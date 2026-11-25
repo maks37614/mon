@@ -5,7 +5,7 @@ import {HookFormationSources,readHookCandidates} from "../backend/hookFormationS
 const now=1_800_000_000_000;
 const validation={enoughData:true,finiteData:true,closedCandleOnly:true,lookAheadSafe:true,passed:true,confirmed:true,breakoutConfirmed:true,entryMode:"BREAKOUT",regularPlan:{breakoutClosedAt:now},confluence:{total:87.5}};
 const pattern={id:"r",patternKey:"double_bottom",bias:"bullish",status:"breakout",validation,confidence:88,levels:{entryPrice:100,stopLossPrice:99,targetPrice:102},detectedAt:now-60000};
-const coin={symbol:"BTCUSDT",exchange:"binance",marketType:"futures",timeframe:"1m",quoteAsset:"USDT",currentPrice:100,lastUpdated:now,formationData:{contiguous:true,collectedAt:now,lastClosedAt:now},formations:[pattern],earlyFormations:[{id:"e",patternKey:"double_bottom",bias:"bullish",stage:"forming",breakoutEntry:100,breakoutStopLoss:99,target:102,observedAt:now}]};
+const coin={symbol:"BTCUSDT",exchange:"binance",marketType:"futures",timeframe:"1m",quoteAsset:"USDT",currentPrice:100,volume24hUsd:100000,lastUpdated:now,formationData:{contiguous:true,collectedAt:now,lastClosedAt:now},formations:[pattern],earlyFormations:[{id:"e",patternKey:"double_bottom",bias:"bullish",stage:"forming",breakoutEntry:100,breakoutStopLoss:99,target:102,observedAt:now}]};
 const settings={...DEFAULT_SETTINGS};
 const key={exchange:"binance" as const,symbol:"BTCUSDT",timeframe:"1m"};
 const read=(c:unknown=coin)=>readHookCandidates([c],"binance","1m","regular",now);
@@ -79,4 +79,15 @@ test("early source normalizes seconds and polls a running shared job instead of 
 test("regular request uses chosen volume and rejects inconsistent response counts",async()=>{
  let request="";const source=new HookFormationSources((async(input)=>{request=String(input);return Response.json({success:true,count:2,data:[coin]});}) as typeof fetch,()=>now);
  await source.refresh({...settings,hookMinVolumeUsd:50000});assert.match(request,/minVolume=50000/);assert.equal(source.signals(settings).length,0);assert.match(Object.values(source.diagnostics())[0],/Неповна/);
+});
+
+test("volume scopes cannot reuse old authorization or accept below-threshold coins",async()=>{
+ const source=new HookFormationSources((async()=>Response.json({success:true,data:[coin]})) as typeof fetch,()=>now);
+ const low={...settings,hookMinVolumeUsd:50000},high={...settings,hookMinVolumeUsd:200000};
+ await source.refresh(low);const signal=source.signals(low)[0];assert.ok(signal);assert.equal(source.allowsEntry(signal,high),false);
+ await source.refresh(high);assert.equal(source.signals(high).length,0);assert.equal(source.coverage(high)[0].receivedPatterns,1);
+ assert.equal(source.allowsEntry(signal,low),true);
+});
+test("contradictory breakout status and retest entry mode never confirm",()=>{
+ const result=read({...coin,formations:[{...pattern,validation:{...validation,entryMode:"RETEST"}}]});assert.equal(result[0].signal.status,"watching");
 });

@@ -1123,7 +1123,7 @@ export default function App() {
                     {scan.sourceCoverage.map((scope:any)=><p className="muted" key={scope.key}>
                       {scope.timeframe} · {scope.source==="regular"?"Звичайні":"Ранні"} ·
                       {scope.error ? " "+scope.error : scope.refreshing ? " оновлення" : scope.fresh ? " актуальні дані" : " немає свіжих даних"} ·
-                      отримано монет {scope.receivedCoins??"—"}, формацій {scope.receivedPatterns??"—"} · після перевірок {scope.validPatterns} · після фільтрів {scope.visiblePatterns} · допущено {scope.eligiblePatterns}
+                      відповідь {scope.responseMs==null?"—":`${scope.responseMs} мс`} · отримано монет {scope.receivedCoins??"—"}, формацій {scope.receivedPatterns??"—"} · після перевірок {scope.validPatterns} · після фільтрів {scope.visiblePatterns} · допущено {scope.eligiblePatterns}
                     </p>)}
                     <p className="muted">Покриття залежить від API h00k.top; це не повний прохід усіх контрактів біржі.</p>
                   </div>}
