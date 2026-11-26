@@ -1,0 +1,26 @@
+name: Bot verification
+on:
+  push:
+    branches: [auto/hook-formation-source-guard]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: bot-verification-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ENABLE_LIVE_TRADING: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.1"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
