@@ -636,6 +636,7 @@ export class Trading {
       stopLoss,
       takeProfit,
       createdAt: Date.now(),
+      maxHoldingSeconds:s.maxHoldingSeconds,
       kind: "entry",
     };
     b.used[signal.id] = now;
@@ -708,6 +709,7 @@ export class Trading {
     status: Position["status"],
   ): Position {
     const openedAt = fill.at || intent.createdAt;
+    const holding=intent.maxHoldingSeconds??s.maxHoldingSeconds;
     return {
       id: intent.id,
       exchange: intent.exchange,
@@ -722,8 +724,8 @@ export class Trading {
       stopLoss: intent.stopLoss,
       takeProfit: intent.takeProfit,
       openedAt,
-      expiresAt: s.maxHoldingSeconds
-        ? openedAt + s.maxHoldingSeconds * 1000
+      expiresAt: holding
+        ? openedAt + holding * 1000
         : 0,
       entryFee: fill.fee,
       entryOrderId: fill.id,
@@ -732,6 +734,14 @@ export class Trading {
       status,
       unrealizedPnl: 0,
     };
+  }
+  private async verifyBybitProtection(p:Position,venue:{direction:string;quantity:number;stopLoss:number;takeProfit:number;protectionReported?:boolean}):Promise<"verified"|"missing"|"unknown"> {
+    if(venue.protectionReported===false || !Number.isFinite(venue.stopLoss) || !Number.isFinite(venue.takeProfit)) return "unknown";
+    if(venue.direction!==p.direction || !sameQuantity(venue.quantity,p.quantity)) return "unknown";
+    if(venue.stopLoss<=0 || venue.takeProfit<=0) return "missing";
+    const expected=await this.gateway.expectedProtection(p.intent);
+    const matches=(a:number,b:number)=>Math.abs(a-b)<=Math.max(Number.EPSILON*Math.max(a,b)*8,Math.abs(b)*1e-10);
+    return matches(venue.stopLoss,expected.stopLoss)&&matches(venue.takeProfit,expected.takeProfit)?"verified":"unknown";
   }
   private async adoptEntry(b: Book, intent: Intent, fill: Fill, s: Settings) {
     if(!fill.id || !Number.isFinite(fill.filled) || fill.filled<=0 ||
@@ -751,7 +761,7 @@ export class Trading {
       if (intent.exchange === "bybit") {
         const account = await this.gateway.account(intent.exchange),
           venue = account.positions.find((x) => x.symbol === p.symbol);
-        if (!venue || venue.stopLoss <= 0 || venue.takeProfit <= 0)
+        if (!venue || await this.verifyBybitProtection(p,venue)!=="verified")
           throw new Error("Захисні рівні Bybit не підтверджені");
       }
       p.status = "active";
@@ -1290,9 +1300,7 @@ export class Trading {
         let status:"verified"|"missing"|"unknown"="unknown";
         try {
           if(p.exchange==="bybit") {
-            if(venue.protectionReported===false || !Number.isFinite(venue.stopLoss) || !Number.isFinite(venue.takeProfit))
-              status="unknown";
-            else status=venue.stopLoss>0 && venue.takeProfit>0?"verified":"missing";
+            status=await this.verifyBybitProtection(p,venue);
           } else status=await this.gateway.checkProtection(p.intent,p.guards);
         } catch { /* Transient network errors are explicitly unknown, never missing. */ }
         p.protectionCheck={at:Date.now(),status};

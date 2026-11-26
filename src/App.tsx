@@ -1268,6 +1268,7 @@ export default function App() {
                                         () =>
                                           api(`/api/positions/${p.id}/close`, {
                                             liveAcknowledged: live,
+                                            expectedMode:s.mode,
                                           }),
                                         "Запит закриття опрацьовано",
                                       );
@@ -1490,6 +1491,7 @@ export default function App() {
                                         api(`/api/signals/${encodeURIComponent(signal.id)}/enter`, {
                                           liveAcknowledged: live,
                                           expectedDirection:orderDirection(signal),
+                                          expectedMode:s.mode,
                                         }),
                                       "Запит входу опрацьовано",
                                     );

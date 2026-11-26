@@ -145,6 +145,7 @@ function fixture(t: TestContext, mode: Mode = "paper", exchange: Exchange = "bin
       broker.positions.push({ ...intent, entryPrice: price, currentPrice: price });
       return { id: `stub-${intent.id}`, filled: intent.quantity, average: price, fee: 0.015, status: "closed" };
     },
+    expectedProtection:async(i:any)=>({stopLoss:i.stopLoss,takeProfit:i.takeProfit}),
     protection: async (_intent: any, _quantity: number, saved: any) => { saved("stub-sl"); saved("stub-tp"); },
   };
   paperVenue(market, broker, () => price);

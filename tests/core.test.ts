@@ -125,6 +125,7 @@ function fixture(t: any, mode: "paper" | "live" = "paper") {
       return fill;
     },
     read: async (intent: any) => broker.orders.get(intent.id) || null,
+    expectedProtection:async(i:any)=>({stopLoss:i.stopLoss,takeProfit:i.takeProfit}),
     protection: async (_i: any, _q: any, saved: any) => {
       if (broker.guardFailed) throw new Error("fixture guard rejection");
       saved("sl-1", "stopLoss");
@@ -994,4 +995,27 @@ test("live protection verification selects the oldest checks within the per-cycl
  await f.trading.monitor();
  assert.deepEqual(checked,["COIN19USDT","COIN18USDT","COIN17USDT","COIN16USDT"]);
  assert.equal(f.trading.snapshot().positions.length,20);
+});
+
+test("Bybit protection with changed levels is not verified and pauses entries",async t=>{
+ const f=fixture(t,"live");
+ f.vault.save("bybit","fixture-key","fixture-secret");f.vault.verify("bybit");
+ await f.trading.updateSettings({exchange:"bybit"});
+ f.store.set("signals",[signal({exchange:"bybit"})]);
+ await f.trading.enter("signal-1");
+ const b=f.store.get<any>("book:live",null);b.positions[0].protectionCheck.at=Date.now()-31000;f.store.set("book:live",b);
+ f.broker.positions[0].stopLoss*=.98;
+ await f.trading.updateSettings({autoEntries:true});
+ await f.trading.monitor();
+ assert.equal(f.trading.settings().autoEntries,false);
+ assert.equal(f.trading.snapshot().positions[0].protectionCheck?.status,"unknown");
+ assert.equal(f.broker.submitted.length,1);
+});
+test("pending order retains its original holding duration after settings change",async t=>{
+ const f=fixture(t,"live");await f.trading.updateSettings({maxHoldingSeconds:120});
+ f.broker.unknown=true;await assert.rejects(f.trading.enter("signal-1"));
+ await f.trading.updateSettings({maxHoldingSeconds:600});
+ await new Trading(f.store,f.market,f.vault,f.broker,true).monitor();
+ const p=f.trading.snapshot().positions[0];assert.equal(p.expiresAt-p.openedAt,120000);
+ assert.equal(f.broker.submitted.length,1);
 });

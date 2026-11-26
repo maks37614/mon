@@ -35,6 +35,7 @@ export type Intent = {
   stopLoss: number;
   takeProfit: number;
   createdAt: number;
+  maxHoldingSeconds?: number;
   orderId?: string;
   kind: "entry" | "close";
   positionId?: string;
@@ -258,6 +259,15 @@ export class ExchangeGateway {
         .reduce((a: number, f: any) => a + Number(f.cost || 0), 0),
       at: Number(raw.lastTradeTimestamp || raw.timestamp || Date.now()),
     };
+  }
+  async expectedProtection(intent:Intent) {
+    const client=await this.client(intent.exchange),symbol=this.symbol(client,intent.symbol);
+    const stopLoss=Number(client.priceToPrecision(symbol,intent.stopLoss));
+    const takeProfit=Number(client.priceToPrecision(symbol,intent.takeProfit));
+    if(!Number.isFinite(stopLoss) || stopLoss<=0 || !Number.isFinite(takeProfit) || takeProfit<=0 ||
+       (intent.direction==="LONG"?stopLoss>=takeProfit:stopLoss<=takeProfit))
+      throw new Error("Некоректні округлені захисні рівні");
+    return {stopLoss,takeProfit};
   }
   async prepare(exchange: Exchange, symbolId: string, leverage: number) {
     const client = await this.client(exchange),
