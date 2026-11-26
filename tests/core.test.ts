@@ -957,3 +957,41 @@ test("one failed pending-order read does not interrupt reconciliation of other o
  assert.deepEqual(f.trading.snapshot().pending.map(x=>x.id),["offline"]);
  assert.equal(f.broker.submitted.length,0);
 });
+
+
+test("twenty paper positions open automatically, survive a new Trading instance, and close without venue orders",async t=>{
+ const f=fixture(t,"paper");
+ const symbols=Array.from({length:21},(_,i)=>`COIN${i}USDT`);
+ let price=100;
+ f.market.getPrices=async()=>({at:Date.now(),data:Object.fromEntries(symbols.map(symbol=>[symbol,price]))});
+ f.market.getMarkets=async()=>symbols.map(symbol=>({symbol,quantityStep:.001,minQuantity:.001,minNotional:5,tickSize:.01}));
+ paperVenue(f.market,f.broker,()=>price);
+ await f.trading.updateSettings({autoEntries:true,maxPositions:20,maxHoldingSeconds:0});
+ f.store.set("signals",symbols.map((symbol,i)=>signal({symbol,id:`load-${i}`})));
+ await f.trading.monitor();
+ assert.equal(f.trading.snapshot().positions.length,20);
+ assert.equal(new Set(f.trading.snapshot().positions.map(p=>p.symbol)).size,20);
+ assert.equal(f.broker.submitted.length,0);
+ const bot=new Trading(f.store,f.market,f.vault,f.broker,true);
+ await bot.updateSettings({autoEntries:false});
+ await bot.monitor();assert.equal(bot.snapshot().positions.length,20);
+ price=101;await bot.monitor();
+ assert.equal(bot.snapshot().positions.length,0);assert.equal(bot.snapshot().history.length,20);
+ assert.ok(bot.snapshot().history.every(p=>p.reason==="TP"));
+ assert.equal(f.broker.submitted.length,0);
+});
+test("live protection verification selects the oldest checks within the per-cycle budget",async t=>{
+ const f=fixture(t,"live");
+ await f.trading.enter("signal-1");
+ const b=f.store.get<any>("book:live",null),p=b.positions[0],v=f.broker.positions[0],now=Date.now();
+ b.positions=Array.from({length:20},(_,i)=>({...structuredClone(p),id:`guard-${i}`,symbol:`COIN${i}USDT`,openedAt:now-60000,expiresAt:0,
+  intent:{...p.intent,id:`guard-${i}`,symbol:`COIN${i}USDT`},protectionCheck:{at:now-31000-i*1000,status:"verified"}}));
+ f.store.set("book:live",b);
+ f.broker.positions=b.positions.map((p:any)=>({...v,symbol:p.symbol}));
+ const checked:string[]=[];f.broker.checkProtection=async(i:any)=>{checked.push(i.symbol);return "verified"};
+ await f.trading.monitor();
+ assert.deepEqual(checked,["COIN19USDT","COIN18USDT"]);
+ await f.trading.monitor();
+ assert.deepEqual(checked,["COIN19USDT","COIN18USDT","COIN17USDT","COIN16USDT"]);
+ assert.equal(f.trading.snapshot().positions.length,20);
+});

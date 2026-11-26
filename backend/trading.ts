@@ -158,7 +158,12 @@ export class Trading {
   updateSettings(input: unknown) {
     const requested=input && typeof input==="object" && !Array.isArray(input)?input as Partial<Settings>:null;
     // An explicit pause latches immediately, before waiting for network work in the trading queue.
-    if(requested?.autoEntries===false) { this.entryPauseRequested=true; this.pauseEpoch++; }
+    if(requested?.autoEntries===false) {
+      this.entryPauseRequested=true;
+      this.pauseEpoch++;
+      // A restart during a queued pause must not restore previously enabled entries.
+      this.store.set("settings",{...this.settings(),autoEntries:false});
+    }
     const epoch=this.pauseEpoch;
     return this.mutex.run(async () => {
       const previous = this.settings(),
@@ -344,7 +349,7 @@ export class Trading {
           )
             await this.reconcileLive(b, s);
           if (s.mode === "live") {
-            for (const trade of b.history.filter(t => t.fundingComplete === false && Date.now() - t.closedAt >= 60000 && Date.now() - (t.fundingCheckedAt || 0) >= 60000).slice(0, 3)) {
+            for (const trade of b.history.filter(t => t.fundingComplete === false && Date.now() - t.closedAt >= 60000 && Date.now() - (t.fundingCheckedAt || 0) >= 60000).sort((a,z)=>(a.fundingCheckedAt||0)-(z.fundingCheckedAt||0)).slice(0, 1)) {
               trade.fundingCheckedAt = Date.now();
               try {
                 const funding=await this.gateway.fundingCost(trade.exchange, trade.symbol, trade.openedAt!, trade.closedAt);
@@ -355,14 +360,19 @@ export class Trading {
               } catch { /* Keep the missing cost explicit and retry later. */ }
             }
             for(const trade of b.history.filter(t=>t.feesComplete===false && t.entryOrderId && t.closingFillIds?.length &&
-              Date.now()-t.closedAt>=60_000 && Date.now()-(t.feesCheckedAt||0)>=60_000).sort((a,z)=>(a.feesCheckedAt||0)-(z.feesCheckedAt||0)).slice(0,2)) {
+              Date.now()-t.closedAt>=60_000 && Date.now()-(t.feesCheckedAt||0)>=60_000).sort((a,z)=>(a.feesCheckedAt||0)-(z.feesCheckedAt||0)).slice(0,1)) {
               trade.feesCheckedAt=Date.now();
               try { await this.recheckFees(trade); } catch { /* Retain provisional fees and retry later. */ }
             }
             this.save("live", b);
           }
           if (s.mode === "paper" && b.positions.length) {
-            for (const p of [...b.positions]) {
+            const urgency=(p:Position)=>p.paper?.closeTrigger || p.paper?.closeFill ||
+              this.paperTicks.get(`${p.exchange}:${p.symbol}`)?.trigger ? 0 :
+              p.expiresAt>0 && p.expiresAt<=Date.now()?1:2;
+            const queue=[...b.positions].sort((a,z)=>urgency(a)-urgency(z) ||
+              (a.paper?.lastObservedAt||0)-(z.paper?.lastObservedAt||0));
+            for (const p of queue) {
               try { await this.monitorPaper(b, p); }
               catch (e: any) {
                 this.paperGaps.add(`${p.exchange}:${p.symbol}`);
@@ -1218,7 +1228,12 @@ export class Trading {
       }
     }
     let protectionBudget=2;
-    for (const p of [...b.positions]) {
+    const priority=(p:Position)=>p.status!=="active" || (p.expiresAt>0 && p.expiresAt<=Date.now()) ||
+      !account.positions.some(v=>v.symbol===p.symbol) ? 0:1;
+    // Oldest observations go first, so slow requests cannot repeatedly starve the tail.
+    const queue=[...b.positions].sort((a,z)=>priority(a)-priority(z) ||
+      (a.protectionCheck?.at||0)-(z.protectionCheck?.at||0));
+    for (const p of queue) {
       try {
       // Re-fetch after recovering an entry; the first snapshot may predate its execution.
       const fresh =
@@ -1241,9 +1256,9 @@ export class Trading {
         )
           p.quantity = venue.quantity;
         else {
-          this.pause(
-            `${p.symbol}: кількість або напрям позиції не збігаються з біржею`,
-          );
+          p.protectionCheck={at:Date.now(),status:"unknown"};
+          this.save("live",b);
+          this.reconciliationFailure(p.id,`${p.symbol}: кількість або напрям позиції не збігаються з біржею`);
           continue;
         }
       }
@@ -1286,6 +1301,7 @@ export class Trading {
           this.pause(`${p.symbol}: ${status==="missing"?"TP/SL відсутній або завершився":"TP/SL не вдалося перевірити"}. Нові входи призупинено; перевірте позицію на біржі`);
       }
       } catch {
+        if(p.status==="active") p.protectionCheck={at:Date.now(),status:"unknown"};
         this.reconciliationFailure(p.id,`${p.symbol}: звірка позиції не завершена; супровід інших позицій продовжується`);
         this.save("live",b);
       }
