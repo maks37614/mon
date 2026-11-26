@@ -754,10 +754,18 @@ export class Trading {
     b.positions.push(p);
     this.save("live", b);
     try {
+      const levels=await this.gateway.expectedProtection(intent);
+      if(p.direction==="LONG"?!(levels.stopLoss<p.entryPrice && p.entryPrice<levels.takeProfit):
+        !(levels.takeProfit<p.entryPrice && p.entryPrice<levels.stopLoss))
+        throw new Error("Ціна виконання поза захисними рівнями");
       await this.gateway.protection(intent, p.quantity, (id) => {
         if (!p.guards.includes(id)) p.guards.push(id);
         this.save("live", b);
       });
+      if (intent.exchange === "binance") {
+        if(await this.gateway.checkProtection(intent,p.guards,p.quantity)!=="verified")
+          throw new Error("Захисні ордери Binance не підтверджені");
+      }
       if (intent.exchange === "bybit") {
         const account = await this.gateway.account(intent.exchange),
           venue = account.positions.find((x) => x.symbol === p.symbol);
@@ -1301,7 +1309,7 @@ export class Trading {
         try {
           if(p.exchange==="bybit") {
             status=await this.verifyBybitProtection(p,venue);
-          } else status=await this.gateway.checkProtection(p.intent,p.guards);
+          } else status=await this.gateway.checkProtection(p.intent,p.guards,p.quantity);
         } catch { /* Transient network errors are explicitly unknown, never missing. */ }
         p.protectionCheck={at:Date.now(),status};
         this.save("live",b);

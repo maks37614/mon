@@ -380,8 +380,29 @@ export class ExchangeGateway {
       onSaved(String(existing.id), type);
     }
   }
+  private validateBinanceGuard(client:any,symbol:string,intent:Intent,quantity:number,suffix:string,order:any) {
+    const info=order.info??{},market=client.market(symbol);
+    const expectedPrice=Number(client.priceToPrecision(symbol,suffix==="sl"?intent.stopLoss:intent.takeProfit));
+    const rawPrice=info.triggerPrice??info.stopPrice??order.triggerPrice??order.stopPrice;
+    const price=Number(rawPrice);
+    const side=String(info.side??order.side??"").toLowerCase();
+    const type=String(info.orderType??info.type??order.type??"").toUpperCase();
+    const reduceOnly=info.reduceOnly??order.reduceOnly;
+    const rawQuantity=info.quantity??info.origQty??order.amount;
+    const amount=Number(rawQuantity)*Number(market.contractSize||1);
+    const matches=(a:number,b:number)=>Number.isFinite(a)&&Number.isFinite(b)&&Math.abs(a-b)<=Math.max(1e-12,Math.abs(b)*1e-9);
+    if(info.symbol!=null && info.symbol!==intent.symbol ||
+       order.symbol!=null && order.symbol!==symbol ||
+       (info.clientAlgoId??info.clientOrderId??order.clientOrderId)!==`${intent.id}-${suffix}` ||
+       side!==(intent.direction==="LONG"?"sell":"buy") ||
+       type!==(suffix==="sl"?"STOP_MARKET":"TAKE_PROFIT_MARKET") ||
+       !(reduceOnly===true || reduceOnly==="true") ||
+       info.workingType!=="CONTRACT_PRICE" || info.positionSide!=="BOTH" ||
+       !matches(price,expectedPrice) || !(expectedPrice>0) ||
+       !matches(amount,quantity)) throw new Error("Параметри захисного ордера Binance не підтверджені");
+  }
   /** Read only. A failed request is not evidence that a guard is missing. */
-  async checkProtection(intent: Intent, guardIds: string[]): Promise<"verified"|"missing"> {
+  async checkProtection(intent: Intent, guardIds: string[],quantity=intent.quantity): Promise<"verified"|"missing"> {
     if(intent.exchange!=="binance") throw new Error("Перевірка захисту потребує даних позиції Bybit");
     const client=await this.client(intent.exchange),symbol=this.symbol(client,intent.symbol);
     for(const suffix of ["sl","tp"]) {
@@ -396,8 +417,9 @@ export class ExchangeGateway {
         throw new Error("Неповна відповідь перевірки захисного ордера");
       if(["closed","canceled","expired","rejected"].includes(order.status)) return "missing";
       if(order.status!=="open") throw new Error("Невідомий статус захисного ордера");
-      if(guardIds.length && !guardIds.includes(String(order.id)))
+      if(guardIds.length!==2 || new Set(guardIds).size!==2 || !guardIds.includes(String(order.id)))
         throw new Error("Ідентифікатор захисного ордера не збігається");
+      this.validateBinanceGuard(client,symbol,intent,quantity,suffix,order);
     }
     return "verified";
   }

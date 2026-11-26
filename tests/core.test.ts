@@ -1019,3 +1019,25 @@ test("pending order retains its original holding duration after settings change"
  const p=f.trading.snapshot().positions[0];assert.equal(p.expiresAt-p.openedAt,120000);
  assert.equal(f.broker.submitted.length,1);
 });
+
+test("Binance guard verification checks the actual algo order fields and partial fill quantity",async t=>{
+ const {store}=storage(t),vault=new Vault(store,randomBytes(32).toString("base64"));vault.save("binance","fixture","fixture");
+ const market={id:"BTCUSDT",symbol:"BTC/USDT:USDT",swap:true,linear:true,settle:"USDT",contractSize:1};
+ const intent:any={id:"entry",exchange:"binance",symbol:"BTCUSDT",direction:"LONG",quantity:.25,stopLoss:99.75,takeProfit:100.45};
+ let patch:any={};
+ const client:any={loadMarkets:async()=>{},markets:{[market.symbol]:market},market:()=>market,priceToPrecision:(_s:string,p:number)=>p.toFixed(2),
+ fetchOrder:async(_id:any,_s:any,p:any)=>{const sl=p.clientOrderId.endsWith("-sl");return {id:sl?"sl":"tp",status:"open",symbol:market.symbol,info:{symbol:market.id,clientAlgoId:p.clientOrderId,side:"SELL",orderType:sl?"STOP_MARKET":"TAKE_PROFIT_MARKET",reduceOnly:true,positionSide:"BOTH",workingType:"CONTRACT_PRICE",triggerPrice:sl?"99.75":"100.45",quantity:"0.1",...patch}}}};
+ const gateway=new ExchangeGateway(vault,async()=>client);
+ assert.equal(await gateway.checkProtection(intent,["sl","tp"],.1),"verified");
+ for(const bad of [{reduceOnly:false},{side:"BUY"},{triggerPrice:"90"},{quantity:".25"},{workingType:"MARK_PRICE"},{positionSide:"LONG"},{clientAlgoId:"other"}]){
+  patch=bad;await assert.rejects(gateway.checkProtection(intent,["sl","tp"],.1),/не підтверджені/);
+ }
+});
+test("fill outside protective prices cannot be marked active",async t=>{
+ const f=fixture(t,"live"),submit=f.broker.submit;
+ f.broker.submit=async(i:any)=>{const fill=await submit(i);return i.kind==="entry"?{...fill,average:101}:fill};
+ await f.trading.enter("signal-1");
+ assert.equal(f.trading.snapshot().positions[0].status,"closing");
+ assert.equal(f.trading.settings().autoEntries,false);
+ assert.deepEqual(f.broker.submitted.map((i:any)=>i.kind),["entry","close"]);
+});
