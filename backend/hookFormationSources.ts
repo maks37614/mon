@@ -235,15 +235,29 @@ export class HookFormationSources {
     return (["regular","early"] as const).flatMap(source=>this.activeRows(settings,source).map(row=>row.signal))
       .filter(signal=>formationIsVisible(signal,settings,this.now()));
   }
+  private exactRegularRow(signal:Signal,settings:Settings):Row|undefined {
+    if(signal.source!=="hook_regular" || !enabled(settings,"regular") ||
+      signal.exchange!==settings.exchange || !settings.timeframes.includes(signal.timeframe)) return;
+    const now=this.now();
+    const snapshot=this.snapshots.get(scope(settings.exchange,signal.timeframe,"regular",settings.hookMinVolumeUsd??0));
+    if(!snapshot || now<snapshot.checkedAt || now-snapshot.checkedAt>=REFRESH_MS) return;
+    const row=snapshot.rows.get(signal.id);
+    return row && row.until>now && sameSignal(signal,row.signal)?row:undefined;
+  }
+  eligibleSignals(settings:Settings) {
+    const now=this.now();
+    return this.activeRows(settings,"regular").filter(row=>!row.blocked && signalAllowsEntry(row.signal,settings,now)).map(row=>row.signal);
+  }
   allowsEntry(signal: Signal, settings: Settings) {
     // Early candidates have no confirmed entry or calibrated score on h00k. Never manufacture either.
-    if (signal.source !== "hook_regular" || !signalAllowsEntry(signal,settings,this.now())) return false;
-    return this.activeRows(settings,"regular").some(row=>!row.blocked && sameSignal(signal,row.signal));
+    if (!signalAllowsEntry(signal,settings,this.now())) return false;
+    const row=this.exactRegularRow(signal,settings);
+    return !!row && !row.blocked;
   }
   entryReasons(signal:Signal,settings:Settings):string[] {
     if(signal.source==="hook_early") return ["Рання формація — лише спостереження"];
     if(signal.source!=="hook_regular") return ["Невідоме джерело формації"];
-    const row=this.activeRows(settings,"regular").find(r=>sameSignal(signal,r.signal));
+    const row=this.exactRegularRow(signal,settings);
     if(!row) return ["Формація h00k більше не актуальна"];
     const reasons=[...row.blockReasons];
     if(settings.confirmedOnly && signal.status!=="confirmed") reasons.push("Вхід h00k ще не підтверджено");

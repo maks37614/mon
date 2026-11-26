@@ -93,6 +93,13 @@ export class Trading {
   private pauseEpoch=0;
   private running = false;
   private lastLiveCycle = 0;
+  private monitorStartedAt=0;
+  private monitorFinishedAt=0;
+  private monitorDurationMs=0;
+  private monitorMaxDurationMs=0;
+  private monitorCycles=0;
+  private monitorSkipped=0;
+  private lastAutoAttemptAt=0;
   private paperGaps = new Set<string>();
   private paperErrorLog = new Map<string, number>();
   private paperWatched = new Map<string, Position>();
@@ -244,6 +251,9 @@ export class Trading {
     return {
       settings: s,
       autoBlockReason,
+      monitorHealth:{running:this.running,busy:this.monitoring,startedAt:this.monitorStartedAt||null,
+        finishedAt:this.monitorFinishedAt||null,durationMs:this.monitorDurationMs,maxDurationMs:this.monitorMaxDurationMs,
+        cycles:this.monitorCycles,skippedTicks:this.monitorSkipped,lastAutoAttemptAt:this.lastAutoAttemptAt||null},
       entrySchedule: tradingScheduleState(s.tradingSchedule, now),
       positions: b.positions.map(({ intent, ...p }) => ({
         ...p,
@@ -271,7 +281,7 @@ export class Trading {
         provisionalTrades:history.filter(t=>!t.estimated && (t.feesComplete!==true || t.fundingComplete!==true)).length,
         accountAt: b.accountAt || null,
       },
-      signals: formations.filter((signal) => signalAllowsEntry(signal, s, now) && (!this.sources || this.sources.allowsEntry(signal, s))),
+      signals: this.sources?this.sources.eligibleSignals(s):formations.filter(signal=>signalAllowsEntry(signal,s,now)),
       formations: formations.map((signal) => {
         const reasons=this.sources?.entryReasons(signal,s)??(!signalAllowsEntry(signal,s,now)?["Сигнал не відповідає умовам входу"]:[]);
         if(b.used[signal.id]) reasons.push("Сигнал уже використано");
@@ -318,8 +328,9 @@ export class Trading {
     await this.mutex.run(async () => {});
   }
   monitor() {
-    if (this.monitoring) return Promise.resolve();
+    if (this.monitoring) {this.monitorSkipped++;return Promise.resolve();}
     this.monitoring = true;
+    this.monitorStartedAt=Date.now();
     return this.mutex
       .run(async () => {
         try {
@@ -375,8 +386,10 @@ export class Trading {
             this.paperMonitoringReady(b,s.mode) &&
             Date.now() - b.lastEntryAt >= s.entryIntervalSeconds * 1000
           ) {
-            const signals = this.snapshot()
-              .signals.filter(
+            // The hot path needs only eligible signals, not a full UI/history snapshot.
+            const signals = (this.sources?this.sources.eligibleSignals(s):
+              this.store.get<Signal[]>("signals",[]).filter(signal=>signalAllowsEntry(signal,s)))
+              .filter(
                 (signal) =>
                   !b.used[signal.id] &&
                   !b.positions.some((p) => p.symbol === signal.symbol) &&
@@ -396,20 +409,21 @@ export class Trading {
             const cycleStarted=Date.now();
             for (let candidate = 0; candidate < maxAttempts; candidate++) {
               const signal = signals[(cursor + candidate) % signals.length];
+              const currentBook=this.book(s.mode);
               if (
-                this.book(s.mode).positions.length >= s.maxPositions ||
-                this.book(s.mode).pending.length > 0 ||
-                this.book(s.mode).positions.some(p => p.status !== "active") ||
+                currentBook.positions.length >= s.maxPositions ||
+                currentBook.pending.length > 0 ||
+                currentBook.positions.some(p => p.status !== "active") ||
                 this.stopping || this.entryPauseRequested || !this.settings().autoEntries ||
                 Date.now()-cycleStarted>=8000 ||
                 !tradingScheduleState(this.settings().tradingSchedule).allowed
               )
                 break;
               // Persist only the candidates actually attempted, not the entire planned batch.
-              const nextBook=this.book(s.mode);
-              nextBook.candidateCursor=(cursor+candidate+1)%signals.length;
-              this.save(s.mode,nextBook);
+              currentBook.candidateCursor=(cursor+candidate+1)%signals.length;
+              this.save(s.mode,currentBook);
               try {
+                this.lastAutoAttemptAt=Date.now();
                 await this.enterLocked(signal, true);
                 const current=this.book(s.mode);
                 this.recordAutoDecision(signal.id,current.positions.some(p=>p.intent.signal.id===signal.id && p.status==="active")?"opened":"pending",
@@ -443,6 +457,10 @@ export class Trading {
         }
       })
       .finally(() => {
+        this.monitorFinishedAt=Date.now();
+        this.monitorDurationMs=Math.max(0,this.monitorFinishedAt-this.monitorStartedAt);
+        this.monitorMaxDurationMs=Math.max(this.monitorMaxDurationMs,this.monitorDurationMs);
+        this.monitorCycles++;
         this.monitoring = false;
       });
   }

@@ -98,3 +98,13 @@ test("blocked source rows expose accurate reasons without changing authorization
  const s={...settings,confirmedOnly:false};await source.refresh(s);const row=source.signals(s)[0];assert.ok(row);
  assert.equal(source.allowsEntry(row,s),false);assert.ok(source.entryReasons(row,s).some(r=>r.includes("ретесту")));
 });
+
+test("direct lookup and eligible list preserve exact authorization for many rows",async()=>{
+ const coins=Array.from({length:200},(_,i)=>({...coin,symbol:`COIN${i}USDT`}));
+ const source=new HookFormationSources((async()=>Response.json({success:true,data:coins})) as typeof fetch,()=>now);
+ await source.refresh(settings);const eligible=source.eligibleSignals(settings);
+ assert.equal(eligible.length,200);assert.ok(eligible.every(s=>source.allowsEntry(s,settings)));
+ assert.equal(source.allowsEntry({...eligible[0],symbol:eligible[1].symbol},settings),false);
+ assert.equal(source.eligibleSignals({...settings,hookRegularFormations:false}).length,0);
+ assert.equal(source.eligibleSignals({...settings,minScore:95}).length,0);
+});
