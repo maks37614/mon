@@ -5,10 +5,11 @@ export const HOOK_FORMATION_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"] a
 const MAX_AGE = 120_000;
 const REFRESH_MS = 45_000;
 const POLL_MS = 30_000;
+const MIN_REST_AFTER_RESPONSE_MS=15_000;
 type Source = "regular" | "early";
 type Key = { exchange: Exchange; symbol: string; timeframe: string };
 type Row = { symbol: string; until: number; signal: Signal; blocked: boolean; blockReasons: string[] };
-type Snapshot = { rows: Map<string, Row>; checkedAt: number; receivedCoins: number; receivedPatterns: number; responseMs: number };
+type Snapshot = { rows: Map<string, Row>; startedAt: number; checkedAt: number; receivedCoins: number; receivedPatterns: number; responseMs: number };
 const TYPES: Record<string,string> = {
   double_top:"Double Top", double_bottom:"Double Bottom", asc_triangle:"Ascending Triangle",
   desc_triangle:"Descending Triangle", bull_flag:"Bull Flag", bear_flag:"Bear Flag",
@@ -114,10 +115,13 @@ export class HookFormationSources {
   private jobs = new Map<string, Promise<void>>();
   private errors = new Map<string, string>();
   private generation = 0;
+  private generationController=new AbortController();
   private retryAt = new Map<string, number>();
   private earlyJobs = new Map<string,string>();
   invalidate() {
     this.generation++;
+    this.generationController.abort();
+    this.generationController=new AbortController();
     this.snapshots.clear();
     this.jobs.clear();
     this.errors.clear();
@@ -127,7 +131,7 @@ export class HookFormationSources {
   constructor(private fetcher: typeof fetch = fetch, private now: () => number = Date.now) {}
   private async request(path: string, init: RequestInit = {}) {
     const response = await this.fetcher(new URL(path, "https://h00k.top"), {
-      ...init, redirect: "error", cache: "no-store", signal: AbortSignal.timeout(45_000),
+      ...init, redirect: "error", cache: "no-store", signal: AbortSignal.any([this.generationController.signal,AbortSignal.timeout(45_000)]),
     });
     if (!response.ok) throw new Error("h00k HTTP " + response.status);
     const body = await response.json();
@@ -140,7 +144,8 @@ export class HookFormationSources {
     if (existing) return existing;
     if (this.now() < (this.retryAt.get(key) ?? 0)) return Promise.resolve();
     const cached = this.snapshots.get(key);
-    if (cached && this.now() >= cached.checkedAt && this.now() - cached.checkedAt < POLL_MS) return Promise.resolve();
+    if (cached && this.now()>=cached.checkedAt &&
+      this.now()<Math.max(cached.startedAt+POLL_MS,cached.checkedAt+MIN_REST_AFTER_RESPONSE_MS)) return Promise.resolve();
     const generation = this.generation;
     const job = (async () => {
       try {
@@ -190,7 +195,7 @@ export class HookFormationSources {
           const patterns=source==="regular"?coin?.formations:coin?.earlyFormations;
           return sum+(Array.isArray(patterns)?patterns.length:0);
         },0);
-        this.snapshots.set(key, {rows,checkedAt:now,receivedCoins:list.length,receivedPatterns,responseMs:Math.max(0,now-started)});
+        this.snapshots.set(key, {rows,startedAt:started,checkedAt:now,receivedCoins:list.length,receivedPatterns,responseMs:Math.max(0,now-started)});
         // Bound the number of snapshots even when callers change filters without invalidating.
         while (this.snapshots.size>24) this.snapshots.delete(this.snapshots.keys().next().value!);
         this.errors.delete(key);

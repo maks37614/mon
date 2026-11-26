@@ -108,3 +108,17 @@ test("direct lookup and eligible list preserve exact authorization for many rows
  assert.equal(source.eligibleSignals({...settings,hookRegularFormations:false}).length,0);
  assert.equal(source.eligibleSignals({...settings,minScore:95}).length,0);
 });
+
+test("source refresh accounts for request latency without polling faster than the minimum rest",async()=>{
+ let clock=now,calls=0;
+ const source=new HookFormationSources((async()=>{calls++;clock+=10000;return Response.json({success:true,data:[coin]});}) as typeof fetch,()=>clock);
+ await source.refresh(settings);assert.equal(calls,1);
+ clock=now+25000;await source.refresh(settings);assert.equal(calls,1);
+ clock=now+30000;await source.refresh(settings);assert.equal(calls,2);
+});
+test("source invalidation aborts old network requests",async()=>{
+ let signal:AbortSignal|undefined,release!:(r:Response)=>void;
+ const source=new HookFormationSources(((_url,init)=>{signal=init?.signal??undefined;return new Promise<Response>(r=>{release=r;});}) as typeof fetch,()=>now);
+ const pending=source.refresh(settings);source.invalidate();assert.equal(signal?.aborted,true);
+ release(Response.json({success:true,data:[coin]}));await pending;assert.equal(source.eligibleSignals(settings).length,0);
+});

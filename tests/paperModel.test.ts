@@ -383,3 +383,13 @@ test("funding ledger rejects null amounts and conflicting duplicate ids",async t
  data=[row,{...row,income:"-0.6"}];await assert.rejects(gateway.fundingCost("binance","BTCUSDT",0,2000),/дублікати/);
  data=[{...row,income:null}];await assert.rejects(gateway.fundingCost("binance","BTCUSDT",0,2000),/Некоректне/);
 });
+
+test("public risk tier reads share in-flight requests and cache only valid data",async()=>{
+ let calls=0;
+ const market=new MarketData(()=>({...DEFAULT_SETTINGS,requestsPerSecond:1e6}),async()=>{
+  calls++;return Response.json({retCode:0,result:{list:[{symbol:"BTCUSDT",riskLimitValue:"100000",maintenanceMargin:"0.5",initialMargin:"1",maxLeverage:"100",mmDeduction:"0"}]}});
+ });
+ const both=await Promise.all([market.getPublicRiskTiers("BTCUSDT"),market.getPublicRiskTiers("BTCUSDT")]);
+ assert.equal(calls,1);assert.deepEqual(both[0],both[1]);
+ await market.getPublicRiskTiers("BTCUSDT");assert.equal(calls,1);
+});

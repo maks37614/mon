@@ -215,7 +215,10 @@ export class MarketData {
       bids: (row.bids || row.b || []).map((x: any[]) => x.map(Number)),
       asks: (row.asks || row.a || []).map((x: any[]) => x.map(Number)) };
   }
-  async getContractState(exchange: Exchange, symbol: string): Promise<ContractState> {
+  getContractState(exchange: Exchange, symbol: string): Promise<ContractState> {
+    return this.once(`contract-state:${exchange}:${symbol}`,()=>this.readContractState(exchange,symbol));
+  }
+  private async readContractState(exchange: Exchange, symbol: string): Promise<ContractState> {
     if (exchange === "binance") {
       const [mark, last] = await Promise.all([
         this.request(exchange, "/fapi/v1/premiumIndex", { symbol }),
@@ -228,7 +231,19 @@ export class MarketData {
     if (!row) throw new Error("Немає параметрів контракту");
     return { at: Number(raw.time), mark: Number(row.markPrice), last: Number(row.lastPrice), nextFundingAt: Number(row.nextFundingTime) };
   }
-  async getPublicRiskTiers(symbol: string): Promise<RiskTier[]> {
+  private publicRiskCache=new Map<string,{at:number;tiers:RiskTier[]}>();
+  getPublicRiskTiers(symbol:string):Promise<RiskTier[]> {
+    const cached=this.publicRiskCache.get(symbol);
+    if(cached && Date.now()>=cached.at && Date.now()-cached.at<600_000) return Promise.resolve(cached.tiers);
+    return this.once(`bybit-risk:${symbol}`,async()=>{
+      const tiers=await this.readPublicRiskTiers(symbol);
+      this.publicRiskCache.delete(symbol);
+      this.publicRiskCache.set(symbol,{at:Date.now(),tiers});
+      while(this.publicRiskCache.size>300) this.publicRiskCache.delete(this.publicRiskCache.keys().next().value!);
+      return tiers;
+    });
+  }
+  private async readPublicRiskTiers(symbol: string): Promise<RiskTier[]> {
     const rows: any[] = []; let cursor = ""; const seen = new Set<string>();
     do {
       const raw = await this.request("bybit", "/v5/market/risk-limit", { category: "linear", symbol, ...(cursor ? { cursor } : {}) });
