@@ -393,3 +393,48 @@ test("public risk tier reads share in-flight requests and cache only valid data"
  assert.equal(calls,1);assert.deepEqual(both[0],both[1]);
  await market.getPublicRiskTiers("BTCUSDT");assert.equal(calls,1);
 });
+
+
+test("missing or malformed taker rates never become free simulated trades", async t => {
+  const f=fixture(t); f.vault.save("binance","fake","fake");
+  let taker: unknown=null;
+  const gateway=new ExchangeGateway(f.vault,async()=>({
+    loadMarkets:async()=>{},
+    markets:{"BTC/USDT:USDT":{symbol:"BTC/USDT:USDT",id:"BTCUSDT",swap:true,linear:true,settle:"USDT"}},
+    fetchTradingFee:async()=>({taker}),
+    fapiPrivateGetLeverageBracket:async()=>({symbol:"ETHUSDT",brackets:[{notionalCap:50000,maintMarginRatio:.005,cum:0,initialLeverage:20}]}),
+  }));
+  for(const bad of [null,undefined,"","  ",false,NaN]) {
+    taker=bad;
+    await assert.rejects(gateway.takerRate("binance","BTCUSDT",true),/taker/);
+  }
+  taker=0;
+  assert.equal((await gateway.takerRate("binance","BTCUSDT",true)).rate,0);
+  await assert.rejects(gateway.riskTiers("BTCUSDT"),/вибраного контракту/);
+});
+
+test("market data reject wrong-contract books, malformed levels and stale last-trade prices", async () => {
+  let book:any={s:"ETHUSDT",ts:Date.now(),b:[["99","2"]],a:[["101","3"]]};
+  const market=new MarketData(()=>({...DEFAULT_SETTINGS,requestsPerSecond:1e6}),async input=>{
+    const url=new URL(String(input));
+    if(url.pathname==="/v5/market/orderbook") return Response.json({retCode:0,result:book});
+    if(url.pathname==="/fapi/v1/premiumIndex") return Response.json({symbol:"BTCUSDT",time:Date.now(),markPrice:"100",nextFundingTime:Date.now()+60000});
+    if(url.pathname==="/fapi/v2/ticker/price") return Response.json({symbol:"BTCUSDT",time:Date.now()-10000,price:"100"});
+    throw Error(url.pathname);
+  });
+  await assert.rejects(market.getExecutionBook("bybit","BTCUSDT"),/іншого контракту/);
+  book={...book,s:"BTCUSDT",b:[[99,true]]};
+  await assert.rejects(market.getExecutionBook("bybit","BTCUSDT"),/Некоректний рівень/);
+  book={...book,b:[["99","2"]]};
+  assert.equal(depthFill(await market.getExecutionBook("bybit","BTCUSDT"),"buy",1),101);
+  await assert.rejects(market.getContractState("binance","BTCUSDT"),/свіжих цін/);
+});
+
+test("conflicting public funding entries cannot silently replace each other", async () => {
+  const at=28800000;
+  const market=new MarketData(()=>({...DEFAULT_SETTINGS,requestsPerSecond:1e6}),async()=>Response.json([
+    {symbol:"BTCUSDT",fundingTime:at,fundingRate:"0.001",markPrice:"100"},
+    {symbol:"BTCUSDT",fundingTime:at,fundingRate:"0.002",markPrice:"100"},
+  ]));
+  await assert.rejects(market.getFundingEvents("binance","BTCUSDT",at,at),/дублікати funding/);
+});
