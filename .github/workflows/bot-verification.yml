@@ -1,7 +1,9 @@
 name: Bot verification
 on:
   push:
-    branches: [auto/hook-formation-source-guard]
+    branches: [main, auto/hook-formation-source-guard, fix/hook-api-connection-diagnostics]
+  pull_request:
+    branches: [main, auto/hook-formation-source-guard]
   workflow_dispatch:
 permissions:
   contents: read
