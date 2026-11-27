@@ -1099,7 +1099,7 @@ export default function App() {
                   <div className="section-heading">
                     <h2>Охоплення ринку</h2>
                     <span className={`pill ${scan.running ? "positive" : ""}`}>
-                      {scan.sourceCoverage ? (scan.sourceCoverage.some((x:any)=>x.refreshing)?"Оновлення джерела":scan.sourceCoverage.some((x:any)=>x.error)?"Є помилки джерела":scan.sourceCoverage.length && scan.sourceCoverage.every((x:any)=>x.fresh)?"Актуальні дані":"Очікування даних") : scan.running ? "Обробка пакета" : "Очікування розкладу"}
+                      {scan.sourceCoverage ? (!scan.sourceCoverage.length?"Джерела вимкнені":scan.sourceCoverage.some((x:any)=>x.refreshing)?"Оновлення джерела":scan.sourceCoverage.some((x:any)=>x.error)?"Є помилки джерела":scan.sourceCoverage.length && scan.sourceCoverage.every((x:any)=>x.fresh)?"Актуальні дані":"Очікування даних") : scan.running ? "Обробка пакета" : "Очікування розкладу"}
                     </span>
                   </div>
                   {scan.sourceCoverage ? <div className="coverage-values">
@@ -1131,11 +1131,15 @@ export default function App() {
                     {date(scan.lastFullPassAt)}
                   </p></>}
                   {scan.sourceCoverage && <div>
-                    {scan.sourceCoverage.map((scope:any)=><p className="muted" key={scope.key}>
+                    {!scan.sourceCoverage.length && <p className="muted">У налаштуваннях увімкніть звичайні або ранні формації h00k.top. Без джерела сигналів немає.</p>}
+                    {scan.sourceCoverage.map((scope:any)=><div key={scope.key}><p className="muted">
                       {scope.timeframe} · {scope.source==="regular"?"Звичайні":"Ранні"} ·
                       {scope.error ? " "+scope.error : scope.refreshing ? " оновлення" : scope.fresh ? " актуальні дані" : " немає свіжих даних"} ·
                       відповідь {scope.responseMs==null?"—":`${scope.responseMs} мс`} · отримано монет {scope.receivedCoins??"—"}, формацій {scope.receivedPatterns??"—"} · після перевірок {scope.validPatterns} · після фільтрів {scope.visiblePatterns} · допущено {scope.eligiblePatterns}
-                    </p>)}
+                    </p>
+                    <p className="muted">Останній запит: {scope.lastAttemptAt ? date(scope.lastAttemptAt) : "—"} · остання успішна відповідь: {scope.lastSuccessAt ? date(scope.lastSuccessAt) : "—"} · тривалість останньої спроби: {scope.lastResponseMs==null?"—":`${scope.lastResponseMs} мс`} · помилок поспіль: {scope.consecutiveFailures??0}{scope.nextRetryAt?` · наступна спроба не раніше ${date(scope.nextRetryAt)}`:""}</p>
+                    {Object.keys(scope.rejectionCounts??{}).length>0 && <p className="muted">Причини відхилення: {Object.entries(scope.rejectionCounts??{}).map(([reason,count])=>`${reason}: ${count}`).join(" · ")}</p>}
+                    </div>)}
                     <p className="muted">Покриття залежить від API h00k.top; це не повний прохід усіх контрактів біржі.</p>
                     {data.autoBlockReason && <p className="muted">Автовходи: {data.autoBlockReason}</p>}
                     {data.monitorHealth && <p className="muted">
