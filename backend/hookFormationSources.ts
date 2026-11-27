@@ -9,7 +9,9 @@ const MIN_REST_AFTER_RESPONSE_MS=15_000;
 type Source = "regular" | "early";
 type Key = { exchange: Exchange; symbol: string; timeframe: string };
 type Row = { symbol: string; until: number; signal: Signal; blocked: boolean; blockReasons: string[] };
-type Snapshot = { rows: Map<string, Row>; startedAt: number; checkedAt: number; receivedCoins: number; receivedPatterns: number; responseMs: number };
+type Rejections = Record<string, number>;
+type Connection = { lastAttemptAt: number; lastSuccessAt: number | null; consecutiveFailures: number; lastResponseMs: number | null };
+type Snapshot = { rejected: Rejections; rows: Map<string, Row>; startedAt: number; checkedAt: number; receivedCoins: number; receivedPatterns: number; responseMs: number };
 const TYPES: Record<string,string> = {
   double_top:"Double Top", double_bottom:"Double Bottom", asc_triangle:"Ascending Triangle",
   desc_triangle:"Descending Triangle", bull_flag:"Bull Flag", bear_flag:"Bear Flag",
@@ -29,34 +31,37 @@ const enabled = (settings: Settings, source: Source) => source === "regular" ? s
 const fresh = (at: unknown, now: number): at is number => typeof at === "number" && Number.isFinite(at) && at <= now + 2000 && now - at <= MAX_AGE;
 
 /** Do not infer eligibility from a ticker, a spot pair, or an unformed result. */
-export function readHookCandidates(data: unknown, exchange: Exchange, timeframe: string, source: Source, now = Date.now(), minVolumeUsd = 0): Row[] {
+export function readHookCandidates(data: unknown, exchange: Exchange, timeframe: string, source: Source, now = Date.now(), minVolumeUsd = 0, rejected: Rejections = {}): Row[] {
   if (!Array.isArray(data)) throw new Error("Некоректний список формацій h00k");
   const rows: Row[] = [];
+  const reject = (reason: string, count = 1) => { if (count > 0) rejected[reason] = (rejected[reason] ?? 0) + count; };
   for (const coin of data) {
+    const patterns = source === "regular" ? coin?.formations : coin?.earlyFormations;
+    const count = Array.isArray(patterns) ? patterns.length : 0;
     if (!coin || coin.exchange !== exchange || coin.marketType !== "futures" || coin.timeframe !== timeframe ||
         coin.quoteAsset !== "USDT" || typeof coin.symbol !== "string" || !/^[A-Z0-9]{1,30}USDT$/.test(coin.symbol) ||
-        !fresh(coin.lastUpdated, now) || !Number.isFinite(coin.currentPrice) || coin.currentPrice <= 0 ||
-        (minVolumeUsd > 0 && (!Number.isFinite(coin.volume24hUsd) || coin.volume24hUsd < minVolumeUsd))) continue;
+        !Number.isFinite(coin.currentPrice) || coin.currentPrice <= 0 ||
+        (minVolumeUsd > 0 && (!Number.isFinite(coin.volume24hUsd) || coin.volume24hUsd < minVolumeUsd))) { reject("Невірний ринок, інструмент, ціна або обсяг", count); continue; }
+    if (!fresh(coin.lastUpdated, now)) { reject("Застарілі дані монети", count); continue; }
     const proof = coin.formationData;
     const interval = tfMs(timeframe);
     if (!interval || proof?.contiguous !== true || !fresh(proof.collectedAt, now) ||
         proof.collectedAt > coin.lastUpdated || !Number.isSafeInteger(proof.lastClosedAt) ||
         proof.lastClosedAt <= 0 || proof.lastClosedAt > proof.collectedAt ||
-        proof.lastClosedAt % interval !== 0 || now - proof.lastClosedAt > interval + 90_000) continue;
-    const patterns = source === "regular" ? coin.formations : coin.earlyFormations;
+        proof.lastClosedAt % interval !== 0 || now - proof.lastClosedAt > interval + 90_000) { reject("Застарілі або неповні дані свічок", count); continue; }
     if (!Array.isArray(patterns)) continue;
     for (const pattern of patterns) {
       if (!pattern || typeof pattern.id !== "string" || !pattern.id || pattern.id.length > 300 ||
           pattern.source === "screener_24h_preview" ||
           !Object.hasOwn(TYPES,pattern.patternKey) ||
-          (pattern.bias !== "bullish" && pattern.bias !== "bearish")) continue;
+          (pattern.bias !== "bullish" && pattern.bias !== "bearish")) { reject("Непідтримуваний тип або джерело формації"); continue; }
       const early = source === "early";
       const v = pattern.validation;
       const direction = pattern.bias === "bullish" ? "LONG" : "SHORT";
       const sourceStatus = early ? pattern.stage : pattern.status;
       if (early ? !["forming","potential"].includes(sourceStatus) :
         !["forming","ready_to_break","breakout","retest"].includes(sourceStatus) ||
-        v?.enoughData !== true || v?.finiteData !== true || v?.closedCandleOnly !== true || v?.lookAheadSafe !== true) continue;
+        v?.enoughData !== true || v?.finiteData !== true || v?.closedCandleOnly !== true || v?.lookAheadSafe !== true) { reject("Не пройдено перевірку структури або свічок"); continue; }
       // Match the site's displayed "Вхід підтверджено" (validation.passed), not just a breakout label.
       const confirmed = !early && ["breakout","retest"].includes(sourceStatus) &&
         v.passed === true && v.confirmed === true && v.breakoutConfirmed === true &&
@@ -65,16 +70,16 @@ export function readHookCandidates(data: unknown, exchange: Exchange, timeframe:
       const stopLoss = early ? pattern.breakoutStopLoss : pattern.levels?.stopLossPrice;
       const takeProfit = early ? pattern.target : pattern.levels?.targetPrice;
       if (!positive(entryPrice) || !positive(stopLoss) || !positive(takeProfit) ||
-          (direction === "LONG" ? !(stopLoss < entryPrice && entryPrice < takeProfit) : !(takeProfit < entryPrice && entryPrice < stopLoss))) continue;
+          (direction === "LONG" ? !(stopLoss < entryPrice && entryPrice < takeProfit) : !(takeProfit < entryPrice && entryPrice < stopLoss))) { reject("Некоректні рівні входу, TP або SL"); continue; }
       const rawScore = v?.confluence?.total ?? pattern.confidence;
-      if (!early && !score(rawScore)) continue;
+      if (!early && !score(rawScore)) { reject("Некоректна оцінка формації"); continue; }
       const rawDetectedAt = early ? pattern.observedAt : pattern.detectedAt;
       // Early candidate observedAt comes from Kline.time (epoch seconds); regular IDs use milliseconds.
-      if (!positive(rawDetectedAt)) continue;
+      if (!positive(rawDetectedAt)) { reject("Відсутній час виявлення"); continue; }
       const detectedAt = early && rawDetectedAt < 10_000_000_000 ? rawDetectedAt*1000 : rawDetectedAt;
-      if (!Number.isSafeInteger(detectedAt) || detectedAt > now + 2000) continue;
+      if (!Number.isSafeInteger(detectedAt) || detectedAt > now + 2000) { reject("Некоректний час виявлення"); continue; }
       const decisionAt = confirmed ? (sourceStatus === "retest" ? v.regularPlan?.retestClosedAt : v.regularPlan?.breakoutClosedAt) : proof.lastClosedAt;
-      if (!positive(decisionAt) || decisionAt > proof.lastClosedAt || decisionAt % interval !== 0) continue;
+      if (!positive(decisionAt) || decisionAt > proof.lastClosedAt || decisionAt % interval !== 0) { reject("Некоректний час підтвердження"); continue; }
       const signal: Signal = {
         id: JSON.stringify([source, exchange, coin.symbol, timeframe, pattern.id]),
         source: early ? "hook_early" : "hook_regular", sourceFormationId: pattern.id, sourceStatus,
@@ -114,6 +119,7 @@ export class HookFormationSources {
   private snapshots = new Map<string, Snapshot>();
   private jobs = new Map<string, Promise<void>>();
   private errors = new Map<string, string>();
+  private connections = new Map<string, Connection>();
   private generation = 0;
   private generationController=new AbortController();
   private retryAt = new Map<string, number>();
@@ -125,6 +131,7 @@ export class HookFormationSources {
     this.snapshots.clear();
     this.jobs.clear();
     this.errors.clear();
+    this.connections.clear();
     this.retryAt.clear();
     this.earlyJobs.clear();
   }
@@ -134,7 +141,10 @@ export class HookFormationSources {
       ...init, redirect: "error", cache: "no-store", signal: AbortSignal.any([this.generationController.signal,AbortSignal.timeout(45_000)]),
     });
     if (!response.ok) throw new Error("h00k HTTP " + response.status);
-    const body = await response.json();
+    const body = await response.json().catch(error=>{
+      if(error instanceof SyntaxError) throw new Error("API h00k повернув некоректний JSON");
+      throw error;
+    });
     if (body?.success !== true) throw new Error("Некоректна відповідь h00k");
     return body;
   }
@@ -147,9 +157,13 @@ export class HookFormationSources {
     if (cached && this.now()>=cached.checkedAt &&
       this.now()<Math.max(cached.startedAt+POLL_MS,cached.checkedAt+MIN_REST_AFTER_RESPONSE_MS)) return Promise.resolve();
     const generation = this.generation;
+    const started = this.now();
+    const previous = this.connections.get(key);
+    const connection: Connection = {lastAttemptAt: started, lastSuccessAt: previous?.lastSuccessAt ?? null, consecutiveFailures: previous?.consecutiveFailures ?? 0, lastResponseMs: null};
+    this.connections.set(key, connection);
+    while (this.connections.size > 24) this.connections.delete(this.connections.keys().next().value!);
     const job = (async () => {
       try {
-        const started=this.now();
         let data: unknown;
         if (source === "regular") {
           const query = new URLSearchParams({exchange, timeframe, marketType:"futures", minVolume:String(minVolumeUsd)});
@@ -179,7 +193,8 @@ export class HookFormationSources {
         }
         if (generation !== this.generation) return;
         const now = this.now();
-        const candidates=readHookCandidates(data,exchange,timeframe,source,now,minVolumeUsd);
+        const rejected: Rejections = {};
+        const candidates=readHookCandidates(data,exchange,timeframe,source,now,minVolumeUsd,rejected);
         const rows=new Map<string,Row>(), conflicting=new Set<string>();
         for(const row of candidates) {
           const id=row.signal.id, previous=rows.get(id);
@@ -195,9 +210,10 @@ export class HookFormationSources {
           const patterns=source==="regular"?coin?.formations:coin?.earlyFormations;
           return sum+(Array.isArray(patterns)?patterns.length:0);
         },0);
-        this.snapshots.set(key, {rows,startedAt:started,checkedAt:now,receivedCoins:list.length,receivedPatterns,responseMs:Math.max(0,now-started)});
+        this.snapshots.set(key, {rejected,rows,startedAt:started,checkedAt:now,receivedCoins:list.length,receivedPatterns,responseMs:Math.max(0,now-started)});
         // Bound the number of snapshots even when callers change filters without invalidating.
         while (this.snapshots.size>24) this.snapshots.delete(this.snapshots.keys().next().value!);
+        this.connections.set(key, {...connection,lastSuccessAt:now,consecutiveFailures:0,lastResponseMs:Math.max(0,now-started)});
         this.errors.delete(key);
         this.retryAt.delete(key);
       } catch (error) {
@@ -205,7 +221,11 @@ export class HookFormationSources {
         if (generation !== this.generation) return;
         this.snapshots.delete(key);
         this.earlyJobs.delete(key);
-        this.retryAt.set(key,this.now()+15_000);
+        const failedAt = this.now();
+        const failures = connection.consecutiveFailures + 1;
+        this.connections.set(key, {...connection,consecutiveFailures:failures,lastResponseMs:Math.max(0,failedAt-started)});
+        // Retry independently by scope, with bounded backoff; never reuse a failed allowlist.
+        this.retryAt.set(key,failedAt+15_000*2**Math.min(2,failures-1));
         this.errors.set(key, error instanceof Error ? (error.name==="TimeoutError" || error.name==="AbortError" ? "Час очікування API h00k вичерпано" : error.message.slice(0,200)) : "Джерело недоступне");
         while (this.errors.size>24) this.errors.delete(this.errors.keys().next().value!);
         while (this.retryAt.size>24) this.retryAt.delete(this.retryAt.keys().next().value!);
@@ -278,7 +298,21 @@ export class HookFormationSources {
       const supported=(HOOK_FORMATION_TIMEFRAMES as readonly string[]).includes(timeframe);
       const active=!!snapshot && now>=snapshot.checkedAt && now-snapshot.checkedAt<REFRESH_MS;
       const rows=active?[...snapshot!.rows.values()].filter(row=>row.until>now):[];
-      return {key,timeframe,source,supported,checkedAt:snapshot?.checkedAt??null,responseMs:snapshot?.responseMs??null,
+      const connection=this.connections.get(key);
+      const rejectionCounts: Rejections = {...(active ? snapshot?.rejected : {})};
+      const add=(reason:string)=>{rejectionCounts[reason]=(rejectionCounts[reason]??0)+1;};
+      if(active) for(const row of snapshot!.rows.values()) {
+        if(row.until<=now) {add("Термін актуальності даних минув"); continue;}
+        if(!formationIsVisible(row.signal,settings,now)) {
+          if(settings.confirmedOnly && row.signal.status!=="confirmed") add("Вхід ще не підтверджено");
+          else if(row.signal.source!=="hook_early" && row.signal.confidence<settings.minScore) add("Оцінка нижче порогу");
+          else if(!settings.formationTypes.includes(row.signal.formation)) add("Тип формації вимкнено");
+          else if(now-row.signal.candleAt>Math.max(tfMs(row.signal.timeframe),settings.maxSignalAgeSeconds*1000)) add("Перевищено максимальний вік сигналу");
+          else add("Не відповідає фільтрам видимості");
+        } else if(row.blocked) add(row.blockReasons[0]??"Торговий план заблоковано");
+        else if(!signalAllowsEntry(row.signal,settings,now)) add("Перевищено максимальний вік сигналу або рання формація");
+      }
+      return {lastAttemptAt:connection?.lastAttemptAt??null,lastSuccessAt:connection?.lastSuccessAt??null,consecutiveFailures:connection?.consecutiveFailures??0,lastResponseMs:connection?.lastResponseMs??null,nextRetryAt:this.retryAt.get(key)??null,rejectionCounts,key,timeframe,source,supported,checkedAt:snapshot?.checkedAt??null,responseMs:snapshot?.responseMs??null,
         refreshing:this.jobs.has(key),fresh:active,receivedCoins:snapshot?.receivedCoins??null,
         receivedPatterns:snapshot?.receivedPatterns??null,validPatterns:rows.length,
         visiblePatterns:rows.filter(row=>formationIsVisible(row.signal,settings,now)).length,
