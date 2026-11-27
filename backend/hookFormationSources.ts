@@ -191,12 +191,16 @@ export class HookFormationSources {
           if (!scan || scan.params?.exchange !== exchange || scan.params?.marketType !== "futures" ||
               scan.params?.timeframe !== timeframe ||
               (scan.params.minVolumeUsd!==undefined && scan.params.minVolumeUsd!==minVolumeUsd) ||
-              (known && scan.id!==known) || !["running","completed"].includes(scan.status) ||
-              !Array.isArray(scan.missingSources) || scan.missingSources.length || scan.failed > 0)
-            throw new Error("Ранній пошук ще не готовий або неповний");
+              (known && scan.id!==known) || !["running","completed"].includes(scan.status)) {
+            this.earlyJobs.delete(key);
+            throw new Error("Некоректне або завершене із помилкою завдання раннього пошуку");
+          }
           if (scan.status==="running" && typeof scan.id==="string" && /^[a-f0-9-]{36}$/i.test(scan.id))
             this.earlyJobs.set(key,scan.id);
-          else this.earlyJobs.delete(key); // A completed job is refreshed through the normal shared cache.
+          else this.earlyJobs.delete(key);
+          // Keep a verified running job ID even while its data is incomplete. Poll it rather than restarting it.
+          if (!Array.isArray(scan.missingSources) || scan.missingSources.length || scan.failed > 0)
+            throw new Error("Ранній пошук ще не готовий або неповний");
           data = scan.data;
         }
         if (generation !== this.generation) return;
@@ -228,7 +232,8 @@ export class HookFormationSources {
         // Never keep a last-good allowlist after a failed refresh.
         if (generation !== this.generation) return;
         this.snapshots.delete(key);
-        this.earlyJobs.delete(key);
+        // Transient errors must not discard a verified running job. An expired ID must be restarted.
+        if (source==="early" && error instanceof HookHttpError && [400,404,410].includes(error.status)) this.earlyJobs.delete(key);
         const failedAt = this.now();
         const failures = connection.consecutiveFailures + 1;
         this.connections.set(key, {...connection,consecutiveFailures:failures,lastResponseMs:Math.max(0,failedAt-started)});
