@@ -4,9 +4,11 @@
 set -Eeuo pipefail
 umask 077
 if [[ $(id -u) -ne 0 ]]; then echo "Run with sudo" >&2; exit 1; fi
-for binary in docker git curl; do
+for binary in docker git curl flock; do
   command -v "$binary" >/dev/null || { echo "Missing $binary" >&2; exit 1; }
 done
+exec 9>/run/lock/krystian-mon-update.lock
+flock -n 9 || { echo "Another Krystian update is running" >&2; exit 1; }
 root=$(cd "$(dirname "$0")/.." && pwd -P)
 [[ $(git -C "$root" branch --show-current) == main ]] ||
   { echo "Expected the main branch" >&2; exit 1; }
@@ -16,6 +18,9 @@ docker inspect krystian-mon >/dev/null 2>&1 ||
   { echo "The krystian-mon container does not exist. Use the install workflow." >&2; exit 1; }
 [[ -f /etc/krystian-mon.env && -d /var/lib/krystian-mon ]] ||
   { echo "Krystian config/data missing; refusing update" >&2; exit 1; }
+# Do not silently switch a deployment that stores its database elsewhere.
+[[ $(docker inspect krystian-mon --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Type}}:{{.Source}}{{end}}{{end}}') == bind:/var/lib/krystian-mon ]] ||
+  { echo "Unexpected current /data mount; refusing update" >&2; exit 1; }
 grep -qx 'APP_ORIGIN=https://krystian.h00k.top' /etc/krystian-mon.env ||
   { echo "Unexpected app origin, refusing update" >&2; exit 1; }
 grep -qx 'ENABLE_LIVE_TRADING=false' /etc/krystian-mon.env ||
@@ -80,7 +85,7 @@ healthy=false
 for ((i=0;i<40;i++)); do
   if curl --silent --show-error --fail --max-time 2 \
     http://127.0.0.1:3011/healthz 2>/dev/null |
-      grep -q '"ok":true'; then
+      docker exec -i krystian-mon node -e 'let s="";process.stdin.on("data",v=>s+=v);process.stdin.on("end",()=>{try{const b=JSON.parse(s);process.exit(b.ok===true&&b.app==="mon"?0:1)}catch{process.exit(1)}})'; then
     healthy=true
     break
   fi
