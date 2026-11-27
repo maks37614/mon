@@ -29,7 +29,10 @@ import { TradingScheduleSettings } from "./components/TradingScheduleSettings";
 import type { TradingScheduleState } from "../backend/tradingSchedule";
 import "./dashboard.css";
 
+type VisibleSignal = Signal & {canEnter?:boolean;entryReasons?:string[];lastAutoDecision?:{at:number;reason:string;state:"skipped"|"opened"|"pending"}|null};
 type Snapshot = {
+  autoBlockReason?:string|null;
+  monitorHealth?:{running:boolean;busy:boolean;startedAt:number|null;finishedAt:number|null;durationMs:number;maxDurationMs:number;cycles:number;skippedTicks:number;lastAutoAttemptAt:number|null};
   settings: Settings;
   entrySchedule: TradingScheduleState;
   positions: any[];
@@ -38,7 +41,7 @@ type Snapshot = {
   stats: any;
   scanner: any;
   signals: Signal[];
-  formations?: (Signal & { canEnter?: boolean })[];
+  formations?: VisibleSignal[];
   logs: any[];
   credentials: Record<string, { configured: boolean; verified: boolean }>;
   liveAllowed: boolean;
@@ -367,6 +370,7 @@ function SettingsPanel({
 }) {
   const [form, setForm] = useState<Settings>({ ...data.settings }),
     [ack, setAck] = useState(false);
+  const baseline = useRef<Settings>(structuredClone(data.settings));
   const [currentPassword, setCurrentPassword] = useState(""),
     [newPassword, setNewPassword] = useState("");
   const toggle = (key: "timeframes" | "formationTypes", item: string) =>
@@ -382,15 +386,16 @@ function SettingsPanel({
         className="panel"
         onSubmit={(e) => {
           e.preventDefault();
-          void run(
-            () =>
-              api(
-                "/api/settings",
-                { settings: form, liveAcknowledged: ack },
-                "PUT",
-              ),
-            "Налаштування збережено",
-          );
+          // Send only intentional edits, not stale values from the entire form.
+          const patch=Object.fromEntries(Object.keys(form).filter(key=>
+            JSON.stringify(form[key as keyof Settings])!==JSON.stringify(baseline.current[key as keyof Settings])
+          ).map(key=>[key,form[key as keyof Settings]]));
+          void run(async()=>{
+            const saved=await api<Settings>("/api/settings",{settings:patch,liveAcknowledged:ack},"PUT");
+            baseline.current=structuredClone(saved);
+            setForm(saved);
+            setAck(false);
+          },"Налаштування збережено");
         }}
       >
         <div className="section-heading">
@@ -486,8 +491,13 @@ function SettingsPanel({
                 setForm({ ...form, confirmedOnly: e.target.checked })
               }
             />
-            Лише підтверджені формації
+            Лише підтверджені формації h00k.top
           </label>
+        </div>
+        <div className="notice">Джерела монет: тільки формації h00k.top (USDT-ф’ючерси). 30m не підтримується джерелом і не дає сигналів.</div>
+        <div className="check-row">
+          <label className="check"><input type="checkbox" checked={form.hookRegularFormations} onChange={e=>setForm({...form,hookRegularFormations:e.target.checked})}/> Звичайні формації</label>
+          <label className="check"><input type="checkbox" checked={form.hookEarlyFormations} onChange={e=>setForm({...form,hookEarlyFormations:e.target.checked})}/> Ранні формації (спостереження, без входу до підтвердження сайтом)</label>
         </div>
         <TradingScheduleSettings value={form.tradingSchedule}
           onChange={tradingSchedule => setForm({ ...form, tradingSchedule })} />
@@ -523,16 +533,15 @@ function SettingsPanel({
           ))}
         </div>
         <div className="divider" />
-        <h2>Сканування всіх монет</h2>
+        <h2>Формації h00k.top</h2>
         <p className="muted">
-          Усі активні USDT perpetual контракти вибраної біржі. Черга
-          обробляється пакетами; нові монети додаються автоматично. Додавання
-          таймфреймів збільшує час повного проходу.
+          Монети, типи та підтвердження отримуються з h00k.top. Власне сканування біржі не використовується.
+          Кількість кандидатів залежить від покриття джерела та обраних фільтрів.
         </p>
         <fieldset>
           <legend>Таймфрейми</legend>
           <div className="check-row">
-            {TIMEFRAMES.map((tf) => (
+            {TIMEFRAMES.filter(tf => tf !== "30m" || form.timeframes.includes(tf)).map((tf) => (
               <label className="check" key={tf}>
                 <input
                   type="checkbox"
@@ -545,7 +554,12 @@ function SettingsPanel({
           </div>
         </fieldset>
         <div className="form-grid">
-          {scannerFields.map((f) => (
+          <label>Мінімальний обсяг за 24 год (USDT) · джерело h00k
+            <input type="number" min={0} max={1e15} step={1} required value={form.hookMinVolumeUsd}
+              onChange={e=>setForm({...form,hookMinVolumeUsd:e.target.value===""?"":Number(e.target.value)} as Settings)}/>
+            <small>Встанови той самий поріг, що на сторінці формацій h00k.top. 0 — без обмеження.</small>
+          </label>
+          {scannerFields.filter(f => f.key === "minScore" || f.key === "scanIntervalSeconds").map((f) => (
             <label key={f.key}>
               {f.label}
               <input
@@ -567,7 +581,7 @@ function SettingsPanel({
           ))}
         </div>
         <fieldset>
-          <legend>Типи формацій · {FORMATIONS.length} детекторів</legend>
+          <legend>Типи формацій · фільтри h00k.top</legend>
           <div className="pattern-options">
             {FORMATIONS.map((name) => (
               <label className="check" key={name}>
@@ -691,6 +705,7 @@ export default function App() {
     [query, setQuery] = useState(""),
     [chart, setChart] = useState<ChartSelection | null>(null);
   const refreshSequence = useRef(0);
+  const actionInFlight=useRef(false);
   const refresh = useCallback(async () => {
     const sequence = ++refreshSequence.current;
     try {
@@ -743,7 +758,8 @@ export default function App() {
     };
   }, [chart]);
   async function run(fn: () => Promise<any>, success = "") {
-    if (busy) return false;
+    if (actionInFlight.current) return false;
+    actionInFlight.current=true;
     setBusy(true);
     setError("");
     setMessage("");
@@ -756,6 +772,7 @@ export default function App() {
       setError(e.message);
       return false;
     } finally {
+      actionInFlight.current=false;
       setBusy(false);
     }
   }
@@ -783,7 +800,7 @@ export default function App() {
       initialTimeframe: TIMEFRAMES.includes(timeframe) ? timeframe : "1m",
     });
   }
-  const formations: (Signal & { canEnter?: boolean })[] = [...(data.formations || data.signals)];
+  const formations: VisibleSignal[] = [...(data.formations || data.signals)];
   formations.sort((left, right) =>
     Number(right.canEnter !== false) - Number(left.canEnter !== false) ||
     right.candleAt - left.candleAt || right.confidence - left.confidence || right.detectedAt - left.detectedAt);
@@ -795,13 +812,15 @@ export default function App() {
   const emptyScreener = screenerEmptyState(scan, s, data.schedulerMode,
     !!query.trim(), formations.length);
   const displayedSignals = signals.slice(0, 200);
-  const scanOverdue = scanIsOverdue(scan, s);
+  const scanOverdue = scan.sourceCoverage ? scan.sourceCoverage.some((x:any)=>x.supported && !x.fresh && !x.refreshing) : scanIsOverdue(scan, s);
+  const scanWait=Math.max(0,Math.ceil(((scan.lastStartedAt||0)+s.scanIntervalSeconds*1000-Date.now())/1000));
   const remaining = scan.total ? scan.total - (scan.cursor || 0) : 0;
   const minutes = scan.total
     ? (Math.ceil(scan.total / s.scanBatchSize) *
         Math.max(60, s.scanIntervalSeconds)) /
       60
     : 0;
+  const orderDirection=(signal:Signal)=>s.reverseEnabled?(signal.direction==="LONG"?"SHORT":"LONG"):signal.direction;
   const confirmLive = (text: string) =>
     !live ||
     confirm(
@@ -852,7 +871,10 @@ export default function App() {
             onClick={() =>
               run(async () => {
                 await api("/api/auth/logout", {});
+                refreshSequence.current++;
                 setAuthenticated(false);
+                setData(null);
+                setChart(null);
                 setCsrf("");
               })
             }
@@ -929,21 +951,19 @@ export default function App() {
               </p>
             </div>
             <button
-              disabled={busy || scan.running}
+              disabled={busy || scan.running || scanWait>0}
               onClick={() =>
                 run(
                   async () => {
                     const result = await api("/api/scan", {});
-                    if (!result.accepted && result.reason === "interval")
-                      throw new Error(`Між пакетами потрібна пауза ${s.scanIntervalSeconds} с. Перевірте час останнього запуску.`);
                     return result;
                   },
-                  "Пакет сканування запущено",
+                  "Запит оновлення опрацьовано",
                 )
               }
             >
               <RefreshCw size={16} className={scan.running ? "spinning" : ""} />
-              {scan.running ? "Скануємо…" : "Сканувати пакет"}
+              {scan.running ? "Оновлюємо…" : scanWait>0 ? `Оновлення через ${scanWait} с` : scan.sourceCoverage ? "Оновити формації" : "Сканувати пакет"}
             </button>
           </div>
           {data.entrySchedule?.enabled && (
@@ -1046,7 +1066,7 @@ export default function App() {
                     Icon: BarChart3,
                   },
                   {
-                    label: "Закритий P&L",
+                    label: data.stats.provisionalTrades > 0 ? "P&L історії (попередній)" : "P&L історії (до 1000 угод)",
                     value: `${data.stats.closedNetPnl >= 0 ? "+" : ""}${money(data.stats.closedNetPnl)}`,
                     unit: "USDT",
                     positive: data.stats.closedNetPnl >= 0,
@@ -1073,15 +1093,20 @@ export default function App() {
                   </div>
                 ))}
               </div>
+              {data.stats.provisionalTrades > 0 && <p className="muted">Угоди з неповною звіркою комісій або funding: {data.stats.provisionalTrades}. P&L охоплює лише до 1000 останніх збережених угод.</p>}
               <section className="panel coverage-panel">
                 <div>
                   <div className="section-heading">
                     <h2>Охоплення ринку</h2>
                     <span className={`pill ${scan.running ? "positive" : ""}`}>
-                      {scan.running ? "Обробка пакета" : "Очікування розкладу"}
+                      {scan.sourceCoverage ? (!scan.sourceCoverage.length?"Джерела вимкнені":scan.sourceCoverage.some((x:any)=>x.refreshing)?"Оновлення джерела":scan.sourceCoverage.some((x:any)=>x.error)?"Є помилки джерела":scan.sourceCoverage.length && scan.sourceCoverage.every((x:any)=>x.fresh)?"Актуальні дані":"Очікування даних") : scan.running ? "Обробка пакета" : "Очікування розкладу"}
                     </span>
                   </div>
-                  <div className="coverage-values">
+                  {scan.sourceCoverage ? <div className="coverage-values">
+                    <span><strong>{data.formations?.length ?? 0}</strong> формацій після фільтрів</span>
+                    <span><strong>{data.signals.length}</strong> сигналів, допущених джерелом</span>
+                    <span><strong>{scan.sourceCounts?.regular ?? 0}</strong> монет зі звичайними формаціями</span>
+                  </div> : <><div className="coverage-values">
                     <span>
                       <strong>{scan.symbols || "—"}</strong> активних контрактів
                     </span>
@@ -1104,7 +1129,24 @@ export default function App() {
                     Наступний індекс: {scan.cursor || 0} · до кінця проходу:{" "}
                     {remaining || "—"} · повний прохід:{" "}
                     {date(scan.lastFullPassAt)}
-                  </p>
+                  </p></>}
+                  {scan.sourceCoverage && <div>
+                    {!scan.sourceCoverage.length && <p className="muted">У налаштуваннях увімкніть звичайні або ранні формації h00k.top. Без джерела сигналів немає.</p>}
+                    {scan.sourceCoverage.map((scope:any)=><div key={scope.key}><p className="muted">
+                      {scope.timeframe} · {scope.source==="regular"?"Звичайні":"Ранні"} ·
+                      {scope.error ? " "+scope.error : scope.refreshing ? " оновлення" : scope.fresh ? " актуальні дані" : " немає свіжих даних"} ·
+                      відповідь {scope.responseMs==null?"—":`${scope.responseMs} мс`} · отримано монет {scope.receivedCoins??"—"}, формацій {scope.receivedPatterns??"—"} · після перевірок {scope.validPatterns} · після фільтрів {scope.visiblePatterns} · допущено {scope.eligiblePatterns}
+                    </p>
+                    <p className="muted">Останній запит: {scope.lastAttemptAt ? date(scope.lastAttemptAt) : "—"} · остання успішна відповідь: {scope.lastSuccessAt ? date(scope.lastSuccessAt) : "—"} · тривалість останньої спроби: {scope.lastResponseMs==null?"—":`${scope.lastResponseMs} мс`} · помилок поспіль: {scope.consecutiveFailures??0}{scope.nextRetryAt?` · наступна спроба не раніше ${date(scope.nextRetryAt)}`:""}</p>
+                    {Object.keys(scope.rejectionCounts??{}).length>0 && <p className="muted">Причини відхилення: {Object.entries(scope.rejectionCounts??{}).map(([reason,count])=>`${reason}: ${count}`).join(" · ")}</p>}
+                    </div>)}
+                    <p className="muted">Покриття залежить від API h00k.top; це не повний прохід усіх контрактів біржі.</p>
+                    {data.autoBlockReason && <p className="muted">Автовходи: {data.autoBlockReason}</p>}
+                    {data.monitorHealth && <p className="muted">
+                      Торговий цикл: {data.monitorHealth.busy?"виконується":data.monitorHealth.running?"очікує":"зупинено"} · остання тривалість {data.monitorHealth.durationMs} мс · максимум {data.monitorHealth.maxDurationMs} мс · пропущено накладених запусків {data.monitorHealth.skippedTicks}
+                      {data.monitorHealth.lastAutoAttemptAt? ` · остання спроба входу ${date(data.monitorHealth.lastAutoAttemptAt)}`:""}
+                    </p>}
+                  </div>}
                 </div>
                 <div className="coverage-aside">
                   <span className="eyebrow">
@@ -1112,12 +1154,13 @@ export default function App() {
                       ? "ЗОВНІШНІЙ CRON"
                       : "ВНУТРІШНІЙ РОЗКЛАД"}
                   </span>
+                  {scan.sourceCoverage ? <strong>Джерело h00k.top · перевірка приблизно кожні 30 с</strong> : <>
                   <strong>{s.scanBatchSize} за пакет</strong>
                   <span className="muted">
                     Орієнтовний повний цикл:{" "}
                     {minutes ? `від ${minutes} хв` : "після завантаження ринку"}
                     . Фактичний час залежить від API та розкладу.
-                  </span>
+                  </span></>}
                   <span className="muted">
                     Останній запуск: {date(scan.lastStartedAt)}
                   </span>
@@ -1127,7 +1170,9 @@ export default function App() {
                   {data.schedulerMode === "external" && (
                     <span className="muted">Виклик cron: {date(scan.lastCronAt)}</span>
                   )}
-                  {scan.error && (
+                  {scan.sourceCounts && <span>Джерела h00k: звичайні {scan.sourceCounts.regular}, ранні {scan.sourceCounts.early}</span>}
+            {scan.sourceErrors && Object.entries(scan.sourceErrors).map(([scope,error])=><span key={scope} className="negative-text">{scope}: {String(error)}</span>)}
+            {scan.error && (
                     <span className="negative-text">{scan.error}</span>
                   )}
                 </div>
@@ -1216,6 +1261,7 @@ export default function App() {
                               </td>}
                               <td>
                                 {p.expiresAt ? date(p.expiresAt) : "Вимкнено"}
+                                {live && <small className={p.protectionCheck?.status==="verified"?"positive-text":"negative-text"}>TP/SL: {p.protectionCheck?.status==="verified"?"перевірено":p.protectionCheck?.status==="missing"?"відсутній / завершений":"очікує перевірки"}{p.protectionCheck?.at ? ` · ${date(p.protectionCheck.at)}`:""}</small>}
                               </td>
                               <td>
                                 <button
@@ -1226,6 +1272,7 @@ export default function App() {
                                         () =>
                                           api(`/api/positions/${p.id}/close`, {
                                             liveAcknowledged: live,
+                                            expectedMode:s.mode,
                                           }),
                                         "Запит закриття опрацьовано",
                                       );
@@ -1357,8 +1404,7 @@ export default function App() {
                         від таймфрейму; для нового входу діє окремий ліміт {s.maxSignalAgeSeconds} с.
                       </p>
                       <p className="muted">
-                        Оцінка якості: структура до 60, пробій до 25, обсяг до 15 балів.
-                        Це не ймовірність прибутку. Натисніть оцінку, щоб побачити складові.
+                        {scan.sourceCoverage ? "Оцінка та підтвердження надходять з h00k.top. Це не ймовірність прибутку. Ранні формації не мають оцінки входу." : "Оцінка якості: структура до 60, пробій до 25, обсяг до 15 балів. Це не ймовірність прибутку."}
                       </p>
                       {signals.length > displayedSignals.length && (
                         <p className="muted">Показано перші {displayedSignals.length} із {signals.length}. Уточніть пошук, щоб побачити інші монети.</p>
@@ -1412,16 +1458,17 @@ export default function App() {
                               >
                                 {signal.direction}
                               </span>
+                              {s.reverseEnabled && <small>Реверс: {orderDirection(signal)}</small>}
                             </td>
                             <td>{price(signal.entryPrice)}</td>
                             <td>
                               <details className="score-details">
-                                <summary aria-label={`Оцінка ${signal.symbol} ${signal.timeframe}: ${signal.confidence} зі 100`}>{signal.confidence}/100</summary>
+                                <summary aria-label={`Оцінка ${signal.symbol} ${signal.timeframe}: ${signal.confidence} зі 100`}>{signal.source === "hook_early" ? "Без оцінки" : `${signal.confidence}/100`}</summary>
                                 {signal.scoreParts ? <div>
                                   <span>Структура: {signal.scoreParts.structure}/60</span>
                                   <span>Пробій: {signal.scoreParts.breakout}/25</span>
                                   <span>Обсяг: {signal.scoreParts.volume}/15</span>
-                                </div> : <div>Для складових потрібне повторне сканування.</div>}
+                                </div> : <div>{signal.source?.startsWith("hook_")?"Деталі оцінки доступні на сторінці формацій h00k.top.":"Для складових потрібне повторне сканування."}</div>}
                                 <p>{signal.description}</p>
                               </details>
                             </td>
@@ -1435,27 +1482,31 @@ export default function App() {
                               <button
                                 disabled={busy || ("canEnter" in signal && signal.canEnter === false)}
                                 title={"canEnter" in signal && signal.canEnter === false
-                                  ? "Формація видима для аналізу, але максимальний вік нового входу вже минув"
+                                  ? signal.entryReasons?.join("; ") || "Формація не пройшла умови допуску до входу"
                                   : undefined}
                                 onClick={() => {
                                   if (
                                     confirmLive(
-                                      `Відкрити ${signal.symbol} ${signal.direction} на ${s.orderNotionalUsdt} USDT?`,
+                                      `Відкрити ${signal.symbol} ${orderDirection(signal)} на ${s.orderNotionalUsdt} USDT?${s.reverseEnabled?" (реверс)":""}`,
                                     )
                                   )
                                     void run(
                                       () =>
-                                        api(`/api/signals/${signal.id}/enter`, {
+                                        api(`/api/signals/${encodeURIComponent(signal.id)}/enter`, {
                                           liveAcknowledged: live,
+                                          expectedDirection:orderDirection(signal),
+                                          expectedMode:s.mode,
                                         }),
                                       "Запит входу опрацьовано",
                                     );
                                 }}
                               >
                                 {"canEnter" in signal && signal.canEnter === false
-                                  ? "Вік входу вичерпано"
+                                  ? "Вхід заблоковано"
                                   : live ? "Реальний вхід" : "Тестовий вхід"}
                               </button>
+                              {!!signal.entryReasons?.length && <small>{signal.entryReasons.join(" · ")}</small>}
+                              {signal.lastAutoDecision && <small>Остання спроба: {signal.lastAutoDecision.reason} · {date(signal.lastAutoDecision.at)}</small>}
                             </td>
                           </tr>
                         ))}

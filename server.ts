@@ -10,6 +10,7 @@ import { Store } from "./backend/store";
 import { Auth, Vault, safeEqual } from "./backend/security";
 import { MarketData } from "./backend/market";
 import { Scanner } from "./backend/scanner";
+import { HookFormationSources } from "./backend/hookFormationSources";
 import { Trading } from "./backend/trading";
 import { ExchangeGateway, exchangeError } from "./backend/exchange";
 import { DEFAULT_SETTINGS, type Exchange } from "./backend/config";
@@ -26,6 +27,7 @@ type Options = {
   fetcher?: typeof fetch;
   gatewayFactory?: any;
   weightBudget?: number;
+  formationSources?: HookFormationSources;
 };
 const route =
   (fn: (req: Request, res: Response) => unknown) =>
@@ -56,7 +58,7 @@ export function createApplication(options: Options) {
     options.fetcher,
     options.weightBudget,
   );
-  const scanner = new Scanner(store, market),
+  const scanner = new Scanner(store, market, options.formationSources),
     gateway = new ExchangeGateway(vault, options.gatewayFactory);
   const trading = new Trading(
     store,
@@ -64,6 +66,7 @@ export function createApplication(options: Options) {
     vault,
     gateway,
     options.liveAllowed === true,
+    options.formationSources,
   );
   const auth = new Auth(
     store,
@@ -144,7 +147,7 @@ export function createApplication(options: Options) {
         incoming &&
         ["exchange", "timeframes", "candleLimit"].some(
           (k) =>
-            JSON.stringify(incoming[k]) !==
+            Object.hasOwn(incoming,k) && JSON.stringify(incoming[k]) !==
             JSON.stringify(previous[k as keyof typeof previous]),
         )
       )
@@ -172,34 +175,17 @@ export function createApplication(options: Options) {
   };
   app.post(
     "/api/credentials/:exchange",
-    route((req, res) => {
+    route(async (req, res) => {
       const exchange = exchangeParam(req);
-      if (trading.hasLiveExposure())
-        throw new Error(
-          "Не можна змінювати ключі під час відкритих або неузгоджених реальних позицій",
-        );
-      if (trading.settings().mode === "live")
-        throw new Error("Перед зміною ключів перейдіть у віртуальний режим");
-      vault.save(
-        exchange,
-        String(req.body.apiKey || "").trim(),
-        String(req.body.apiSecret || "").trim(),
-      );
-      gateway.invalidate(exchange);
-      res.json(vault.status(exchange));
+      if (typeof req.body?.apiKey !== "string" || typeof req.body?.apiSecret !== "string")
+        throw new Error("Некоректний формат ключів");
+      res.json(await trading.saveCredentials(exchange,req.body.apiKey.trim(),req.body.apiSecret.trim()));
     }),
   );
   app.delete(
     "/api/credentials/:exchange",
-    route((req, res) => {
-      const exchange = exchangeParam(req);
-      if (trading.hasLiveExposure() || trading.settings().mode === "live")
-        throw new Error(
-          "Спочатку закрийте реальні позиції та вимкніть реальний режим",
-        );
-      vault.remove(exchange);
-      gateway.invalidate(exchange);
-      res.json({ configured: false, verified: false });
+    route(async (req, res) => {
+      res.json(await trading.removeCredentials(exchangeParam(req)));
     }),
   );
   app.post(
@@ -216,7 +202,9 @@ export function createApplication(options: Options) {
         req.body.liveAcknowledged !== true
       )
         throw new Error("Підтвердьте реальний ордер");
-      await trading.enter(String(req.params.id));
+      const expectedMode=req.body?.expectedMode;
+      if(expectedMode!==undefined && expectedMode!=="paper" && expectedMode!=="live") throw new Error("Некоректний торговий режим");
+      await trading.enter(String(req.params.id), expectedMode??trading.settings().mode, req.body?.liveAcknowledged === true, req.body?.expectedDirection);
       res.json({ ok: true });
     }),
   );
@@ -228,7 +216,9 @@ export function createApplication(options: Options) {
         req.body.liveAcknowledged !== true
       )
         throw new Error("Підтвердьте реальне закриття");
-      await trading.closePosition(String(req.params.id));
+      const expectedMode=req.body?.expectedMode;
+      if(expectedMode!==undefined && expectedMode!=="paper" && expectedMode!=="live") throw new Error("Некоректний торговий режим");
+      await trading.closePosition(String(req.params.id), expectedMode??trading.settings().mode, req.body?.liveAcknowledged === true);
       res.json({ ok: true });
     }),
   );
@@ -290,6 +280,7 @@ export function createApplication(options: Options) {
     res.status(400).json({ error: message });
   });
   let scheduler: ReturnType<typeof setInterval> | null = null;
+  let sourceTimer: ReturnType<typeof setInterval> | null = null;
   return {
     app,
     store,
@@ -299,12 +290,18 @@ export function createApplication(options: Options) {
     scanner,
     gateway,
     start() {
+      if (options.formationSources) {
+        const refresh = () => void options.formationSources!.refresh(trading.settings());
+        refresh();
+        sourceTimer = setInterval(refresh, 15_000);
+      }
       trading.start();
       if (options.schedulerMode === "internal")
         scheduler = setInterval(() => scanner.start(false, "internal"), 10_000);
     },
     async stop() {
       if (scheduler) clearInterval(scheduler);
+      if (sourceTimer) clearInterval(sourceTimer);
       await trading.stop();
       if (scanner.task) await scanner.task;
       store.close();
@@ -315,6 +312,7 @@ export function createApplication(options: Options) {
 async function main() {
   const runtime = createApplication({
     directory: process.env.DATA_DIR || "./data",
+    formationSources: new HookFormationSources(),
     origin: process.env.APP_ORIGIN || "https://evgen.h00k.top",
     username: process.env.ADMIN_USERNAME || "admin",
     passwordHash: process.env.ADMIN_PASSWORD_HASH || "",

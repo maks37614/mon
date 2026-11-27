@@ -11,6 +11,7 @@ import {
 } from "./config";
 import { Mutex, type Store } from "./store";
 import { formationIsVisible, signalAllowsEntry } from "./formationState";
+import { isInsideHookPlan, type HookFormationSources } from "./hookFormationSources";
 import { tradingScheduleState } from "./tradingSchedule";
 import type { MarketData } from "./market";
 import type { Vault } from "./security";
@@ -41,8 +42,10 @@ export type Position = {
   expiresAt: number;
   entryFee: number;
   entryOrderId?: string;
+  closeReason?: string;
   intent: Intent;
   guards: string[];
+  protectionCheck?: { at:number; status:"verified"|"missing"|"unknown" };
   status: "active" | "protecting" | "closing" | "reconciling";
   unrealizedPnl: number;
   paper?: PaperState;
@@ -76,9 +79,27 @@ const sameQuantity = (a: number, b: number) =>
 export class Trading {
   private mutex = new Mutex();
   private timer: ReturnType<typeof setInterval> | null = null;
+  private rejectedEntries = new Map<string, number>();
+  private autoDecisions=new Map<string,{at:number;reason:string;state:"skipped"|"opened"|"pending"}>();
+  private recordAutoDecision(id:string,state:"skipped"|"opened"|"pending",reason:string) {
+    this.autoDecisions.delete(id);
+    this.autoDecisions.set(id,{at:Date.now(),state,reason});
+    while(this.autoDecisions.size>300) this.autoDecisions.delete(this.autoDecisions.keys().next().value!);
+  }
   private monitoring = false;
+  private stopping=false;
+  private reconciliationWarnings=new Map<string,number>();
+  private entryPauseRequested=false;
+  private pauseEpoch=0;
   private running = false;
   private lastLiveCycle = 0;
+  private monitorStartedAt=0;
+  private monitorFinishedAt=0;
+  private monitorDurationMs=0;
+  private monitorMaxDurationMs=0;
+  private monitorCycles=0;
+  private monitorSkipped=0;
+  private lastAutoAttemptAt=0;
   private paperGaps = new Set<string>();
   private paperErrorLog = new Map<string, number>();
   private paperWatched = new Map<string, Position>();
@@ -94,6 +115,7 @@ export class Trading {
     private vault: Vault,
     private gateway: ExchangeGateway,
     readonly liveAllowed: boolean,
+    private sources?: HookFormationSources,
   ) {}
   settings() {
     const saved = this.store.get<Partial<Settings>>("settings", {});
@@ -118,14 +140,36 @@ export class Trading {
     const b = this.book("live");
     return !!(b.positions.length || b.pending.length);
   }
+  private paperMonitoringReady(b:Book,mode:Mode) {
+    return mode!=="paper" || b.positions.every(p=>p.paper && !p.paper.closeTrigger &&
+      Number.isFinite(p.paper.lastObservedAt) && Date.now()-p.paper.lastObservedAt<=15_000 &&
+      !this.paperGaps.has(`${p.exchange}:${p.symbol}`));
+  }
+  private protectionReady(b:Book,mode:Mode) {
+    return mode!=="live" || b.positions.every(p=>p.status!=="active" ||
+      (p.protectionCheck?.status==="verified" && Date.now()-p.protectionCheck.at<90_000));
+  }
   private pause(message: string) {
+    this.entryPauseRequested=true;
+    this.pauseEpoch++;
     this.store.set("settings", { ...this.settings(), autoEntries: false });
     this.store.log("ERROR", message);
   }
   updateSettings(input: unknown) {
+    const requested=input && typeof input==="object" && !Array.isArray(input)?input as Partial<Settings>:null;
+    // An explicit pause latches immediately, before waiting for network work in the trading queue.
+    if(requested?.autoEntries===false) {
+      this.entryPauseRequested=true;
+      this.pauseEpoch++;
+      // A restart during a queued pause must not restore previously enabled entries.
+      this.store.set("settings",{...this.settings(),autoEntries:false});
+    }
+    const epoch=this.pauseEpoch;
     return this.mutex.run(async () => {
       const previous = this.settings(),
         next = validateSettings(input, previous);
+      if (this.sources && next.timeframes.includes("30m") && !previous.timeframes.includes("30m"))
+        throw new Error("Джерело h00k.top не підтримує формації 30m");
       if (
         (next.exchange !== previous.exchange ||
           next.mode !== previous.mode ||
@@ -144,11 +188,37 @@ export class Trading {
         if (!this.vault.status(next.exchange).verified)
           throw new Error("Спочатку перевірте API-ключі вибраної біржі");
       }
+      if (this.sources && (next.exchange !== previous.exchange || next.hookRegularFormations !== previous.hookRegularFormations || next.hookEarlyFormations !== previous.hookEarlyFormations || next.hookMinVolumeUsd !== previous.hookMinVolumeUsd || next.timeframes.join(",") !== previous.timeframes.join(","))) {
+        this.sources.invalidate();
+        this.store.set("signals", []);
+      }
+      if(this.entryPauseRequested && (requested?.autoEntries!==true || epoch!==this.pauseEpoch))
+        next.autoEntries=false;
       this.store.set("settings", next);
+      if(requested?.autoEntries===true && next.autoEntries && epoch===this.pauseEpoch) this.entryPauseRequested=false;
       return next;
     });
   }
-  async verifyCredentials(exchange: Exchange) {
+  saveCredentials(exchange: Exchange, apiKey: string, secret: string) {
+    return this.mutex.run(async () => {
+      if (this.hasLiveExposure() || this.settings().mode === "live")
+        throw new Error("Спочатку закрийте реальні позиції та вимкніть реальний режим");
+      this.vault.save(exchange,apiKey,secret);
+      this.gateway.invalidate(exchange);
+      return this.vault.status(exchange);
+    });
+  }
+  removeCredentials(exchange: Exchange) {
+    return this.mutex.run(async () => {
+      if (this.hasLiveExposure() || this.settings().mode === "live")
+        throw new Error("Спочатку закрийте реальні позиції та вимкніть реальний режим");
+      this.vault.remove(exchange);
+      this.gateway.invalidate(exchange);
+      return this.vault.status(exchange);
+    });
+  }
+  verifyCredentials(exchange: Exchange) {
+    return this.mutex.run(async () => {
     try {
       const account = await this.gateway.account(exchange);
       this.vault.verify(exchange);
@@ -162,6 +232,7 @@ export class Trading {
         e?.message?.startsWith("Потрібен") ? e.message : exchangeError(e),
       );
     }
+    });
   }
   snapshot() {
     const s = this.settings(),
@@ -170,10 +241,24 @@ export class Trading {
     const history = b.history,
       wins = history.filter((t) => t.netPnl > 0).length;
     const now = Date.now();
-    const formations = this.store.get<Signal[]>("signals", [])
+    const formations = (this.sources ? this.sources.signals(s) : this.store.get<Signal[]>("signals", []))
       .filter((signal) => formationIsVisible(signal, s, now));
+    const autoBlockReason=this.entryPauseRequested || !s.autoEntries?"Автоматичні входи вимкнено або запитано паузу"
+      :!tradingScheduleState(s.tradingSchedule,now).allowed?"Поза торговим розкладом"
+      :s.mode==="live" && (!this.liveAllowed || !this.vault.status(s.exchange).verified)?"Реальний режим або API не дозволено"
+      :b.pending.length?"Очікування узгодження ордерів"
+      :b.positions.some(p=>p.status!=="active")?"Позиції потребують узгодження"
+      :!this.protectionReady(b,s.mode)?"Захист відкритої позиції потребує перевірки"
+      :!this.paperMonitoringReady(b,s.mode)?"Симуляція очікує актуальних цін відкритих позицій"
+      :b.positions.length>=s.maxPositions?"Досягнуто ліміт позицій"
+      :now-b.lastEntryAt<s.entryIntervalSeconds*1000?"Інтервал між циклами входу"
+      :null;
     return {
       settings: s,
+      autoBlockReason,
+      monitorHealth:{running:this.running,busy:this.monitoring,startedAt:this.monitorStartedAt||null,
+        finishedAt:this.monitorFinishedAt||null,durationMs:this.monitorDurationMs,maxDurationMs:this.monitorMaxDurationMs,
+        cycles:this.monitorCycles,skippedTicks:this.monitorSkipped,lastAutoAttemptAt:this.lastAutoAttemptAt||null},
       entrySchedule: tradingScheduleState(s.tradingSchedule, now),
       positions: b.positions.map(({ intent, ...p }) => ({
         ...p,
@@ -197,13 +282,26 @@ export class Trading {
         ),
         totalTrades: history.length,
         winRate: history.length ? (wins / history.length) * 100 : 0,
+        historyLimit:1000,
+        provisionalTrades:history.filter(t=>!t.estimated && (t.feesComplete!==true || t.fundingComplete!==true)).length,
         accountAt: b.accountAt || null,
       },
-      signals: formations.filter((signal) => signalAllowsEntry(signal, s, now)),
-      formations: formations.map((signal) => ({
-        ...signal, canEnter: signalAllowsEntry(signal, s, now),
-      })),
-      scanner: this.store.get<any>("scanner", {}),
+      signals: this.sources?this.sources.eligibleSignals(s):formations.filter(signal=>signalAllowsEntry(signal,s,now)),
+      formations: formations.map((signal) => {
+        const reasons=this.sources?.entryReasons(signal,s)??(!signalAllowsEntry(signal,s,now)?["Сигнал не відповідає умовам входу"]:[]);
+        if(b.used[signal.id]) reasons.push("Сигнал уже використано");
+        if(b.positions.some(p=>p.symbol===signal.symbol)) reasons.push("Позиція по монеті вже відкрита");
+        if(b.positions.length>=s.maxPositions) reasons.push("Досягнуто ліміт позицій");
+        if(b.pending.length || b.positions.some(p=>p.status!=="active")) reasons.push("Очікування узгодження ордерів");
+        if(!this.protectionReady(b,s.mode)) reasons.push("Захист відкритої позиції не підтверджено");
+        if(!this.paperMonitoringReady(b,s.mode)) reasons.push("Очікування актуальних цін відкритих позицій");
+        if(now-(b.lastEntries[signal.symbol]||0)<s.entryCooldownSeconds*1000) reasons.push("Пауза повторного входу");
+        if(s.mode==="live" && (!this.liveAllowed || !this.vault.status(s.exchange).verified)) reasons.push("Реальний режим або API не дозволено");
+        const last=this.autoDecisions.get(signal.id);
+        return {...signal,canEnter:!reasons.length,entryReasons:reasons,
+          lastAutoDecision:last && now-last.at<15*60_000?last:null};
+      }),
+      scanner: { ...this.store.get<any>("scanner", {}), ...(this.sources ? { sourceErrors: this.sources.diagnostics(s), sourceCounts: this.sources.counts(s), sourceCoverage: this.sources.coverage(s) } : {}) },
       logs: this.store.get<any[]>("logs", []),
       liveAllowed: this.liveAllowed,
       credentials: {
@@ -213,7 +311,13 @@ export class Trading {
     };
   }
   start() {
+    if(this.running) return;
+    this.stopping=false;
     this.running = true;
+    // A protection observation from the previous process is not a new verification.
+    const live=this.book("live");
+    for(const p of live.positions) if(p.status==="active") p.protectionCheck={at:0,status:"unknown"};
+    if(live.positions.length) this.save("live",live);
     this.syncPaperFeed();
     this.timer = setInterval(() => {
       void this.monitor();
@@ -221,6 +325,7 @@ export class Trading {
     void this.monitor();
   }
   async stop() {
+    this.stopping=true;
     this.running = false;
     this.feed.stop();
     if (this.timer) clearInterval(this.timer);
@@ -228,8 +333,9 @@ export class Trading {
     await this.mutex.run(async () => {});
   }
   monitor() {
-    if (this.monitoring) return Promise.resolve();
+    if (this.monitoring) {this.monitorSkipped++;return Promise.resolve();}
     this.monitoring = true;
+    this.monitorStartedAt=Date.now();
     return this.mutex
       .run(async () => {
         try {
@@ -243,20 +349,33 @@ export class Trading {
           )
             await this.reconcileLive(b, s);
           if (s.mode === "live") {
-            for (const trade of b.history.filter(t => t.fundingComplete === false && Date.now() - t.closedAt >= 60000 && Date.now() - (t.fundingCheckedAt || 0) >= 60000).slice(0, 3)) {
+            for (const trade of b.history.filter(t => t.fundingComplete === false && Date.now() - t.closedAt >= 60000 && Date.now() - (t.fundingCheckedAt || 0) >= 60000).sort((a,z)=>(a.fundingCheckedAt||0)-(z.fundingCheckedAt||0)).slice(0, 1)) {
               trade.fundingCheckedAt = Date.now();
               try {
-                trade.fundingCost = await this.gateway.fundingCost(trade.exchange, trade.symbol, trade.openedAt!, trade.closedAt);
+                const funding=await this.gateway.fundingCost(trade.exchange, trade.symbol, trade.openedAt!, trade.closedAt);
+                if(!Number.isFinite(funding)) throw new Error("Некоректна сума funding");
+                trade.fundingCost = funding;
                 trade.fundingComplete = true;
                 trade.netPnl = trade.grossPnl - trade.fee - trade.fundingCost;
               } catch { /* Keep the missing cost explicit and retry later. */ }
             }
+            for(const trade of b.history.filter(t=>t.feesComplete===false && t.entryOrderId && t.closingFillIds?.length &&
+              Date.now()-t.closedAt>=60_000 && Date.now()-(t.feesCheckedAt||0)>=60_000).sort((a,z)=>(a.feesCheckedAt||0)-(z.feesCheckedAt||0)).slice(0,1)) {
+              trade.feesCheckedAt=Date.now();
+              try { await this.recheckFees(trade); } catch { /* Retain provisional fees and retry later. */ }
+            }
             this.save("live", b);
           }
           if (s.mode === "paper" && b.positions.length) {
-            for (const p of [...b.positions]) {
+            const urgency=(p:Position)=>p.paper?.closeTrigger || p.paper?.closeFill ||
+              this.paperTicks.get(`${p.exchange}:${p.symbol}`)?.trigger ? 0 :
+              p.expiresAt>0 && p.expiresAt<=Date.now()?1:2;
+            const queue=[...b.positions].sort((a,z)=>urgency(a)-urgency(z) ||
+              (a.paper?.lastObservedAt||0)-(z.paper?.lastObservedAt||0));
+            for (const p of queue) {
               try { await this.monitorPaper(b, p); }
               catch (e: any) {
+                this.paperGaps.add(`${p.exchange}:${p.symbol}`);
                 if (p.paper && !p.paper.warnings.includes("data-unavailable")) p.paper.warnings.push("data-unavailable");
                 if (Date.now() - (this.paperErrorLog.get(p.id) || 0) >= 60000) {
                   this.paperErrorLog.set(p.id, Date.now());
@@ -268,41 +387,73 @@ export class Trading {
           }
           this.syncPaperFeed();
           if (
-            s.autoEntries &&
+            !this.stopping && !this.entryPauseRequested && this.settings().autoEntries &&
             tradingScheduleState(s.tradingSchedule).allowed &&
             !b.pending.length &&
+            b.positions.length < s.maxPositions &&
+            b.positions.every(p=>p.status==="active") &&
+            this.protectionReady(b,s.mode) &&
+            this.paperMonitoringReady(b,s.mode) &&
             Date.now() - b.lastEntryAt >= s.entryIntervalSeconds * 1000
           ) {
-            b.lastEntryAt = Date.now();
-            this.save(s.mode, b);
-            const signals = this.snapshot()
-              .signals.filter(
+            // The hot path needs only eligible signals, not a full UI/history snapshot.
+            const signals = (this.sources?this.sources.eligibleSignals(s):
+              this.store.get<Signal[]>("signals",[]).filter(signal=>signalAllowsEntry(signal,s)))
+              .filter(
                 (signal) =>
                   !b.used[signal.id] &&
-                  !b.positions.some((p) => p.symbol === signal.symbol),
+                  !b.positions.some((p) => p.symbol === signal.symbol) &&
+                  Date.now() - (b.lastEntries[signal.symbol] || 0) >= s.entryCooldownSeconds * 1000,
               )
-              .sort((a, z) => z.confidence - a.confidence);
+              .sort((a, z) => z.confidence - a.confidence || z.candleAt-a.candleAt);
+            if (!signals.length) return; // Do not consume an entry interval while the source is empty.
+            b.lastEntryAt = Date.now();
             const maxAttempts = Math.min(
               signals.length,
               Math.max(10, s.maxPositions * 2),
             );
             const cursor =
               (b.candidateCursor || 0) % Math.max(1, signals.length);
-            b.candidateCursor =
-              (cursor + maxAttempts) % Math.max(1, signals.length);
-            this.save(s.mode, b);
+            b.candidateCursor=cursor;
+            this.save(s.mode,b);
+            const cycleStarted=Date.now();
             for (let candidate = 0; candidate < maxAttempts; candidate++) {
               const signal = signals[(cursor + candidate) % signals.length];
+              const currentBook=this.book(s.mode);
               if (
-                this.book(s.mode).positions.length >= s.maxPositions ||
-                !this.settings().autoEntries ||
+                currentBook.positions.length >= s.maxPositions ||
+                currentBook.pending.length > 0 ||
+                currentBook.positions.some(p => p.status !== "active") ||
+                this.stopping || this.entryPauseRequested || !this.settings().autoEntries ||
+                Date.now()-cycleStarted>=8000 ||
                 !tradingScheduleState(this.settings().tradingSchedule).allowed
               )
                 break;
+              // Persist only the candidates actually attempted, not the entire planned batch.
+              currentBook.candidateCursor=(cursor+candidate+1)%signals.length;
+              this.save(s.mode,currentBook);
               try {
+                this.lastAutoAttemptAt=Date.now();
                 await this.enterLocked(signal, true);
-              } catch {
-                /* A rejected signal is retried only after the next configured entry interval. */
+                const current=this.book(s.mode);
+                this.recordAutoDecision(signal.id,current.positions.some(p=>p.intent.signal.id===signal.id && p.status==="active")?"opened":"pending",
+                  current.positions.some(p=>p.intent.signal.id===signal.id && p.status==="active")?"Позицію відкрито":"Результат виконання потребує узгодження");
+              } catch (error) {
+                const message = error instanceof Error ? error.message : "";
+                // Do not expose raw exchange request URLs, signatures, API keys or response bodies.
+                const reason = /^[А-Яа-яІіЇїЄєҐґ]/u.test(message) && !/https?:|api.?key|signature|secret|[{}]/i.test(message)
+                  ? message.slice(0,180) : exchangeError(error);
+                this.recordAutoDecision(signal.id,"skipped",reason);
+                const key = signal.exchange + ":" + signal.symbol + ":" + reason;
+                const at = Date.now();
+                if (at - (this.rejectedEntries.get(key) || 0) >= 60_000) {
+                  this.rejectedEntries.set(key, at);
+                  this.store.log("WARN", signal.symbol + ": автоматичний вхід пропущено — " + reason);
+                }
+                if (this.rejectedEntries.size > 500) {
+                  for (const [k, time] of this.rejectedEntries) if (at-time>=60_000) this.rejectedEntries.delete(k);
+                  while (this.rejectedEntries.size>500) this.rejectedEntries.delete(this.rejectedEntries.keys().next().value!);
+                }
               }
             }
           }
@@ -316,15 +467,24 @@ export class Trading {
         }
       })
       .finally(() => {
+        this.monitorFinishedAt=Date.now();
+        this.monitorDurationMs=Math.max(0,this.monitorFinishedAt-this.monitorStartedAt);
+        this.monitorMaxDurationMs=Math.max(this.monitorMaxDurationMs,this.monitorDurationMs);
+        this.monitorCycles++;
         this.monitoring = false;
       });
   }
-  enter(signalId: string) {
+  enter(signalId: string, expectedMode?: Mode, liveAcknowledged = false, expectedDirection?: unknown) {
     return this.mutex.run(async () => {
-      const signal = this.store
-        .get<Signal[]>("signals", [])
+      const mode=this.settings().mode;
+      if (expectedMode !== undefined && (mode !== expectedMode || (mode==="live" && !liveAcknowledged)))
+        throw new Error("Торговий режим змінився або реальний ордер не підтверджено; повторіть запит");
+      const signal = (this.sources ? this.sources.signals(this.settings()) : this.store.get<Signal[]>("signals", []))
         .find((x) => x.id === signalId);
       if (!signal) throw new Error("Сигнал відсутній або вже застарів");
+      const direction=this.settings().reverseEnabled?(signal.direction==="LONG"?"SHORT":"LONG"):signal.direction;
+      if(expectedDirection!==undefined && expectedDirection!==direction)
+        throw new Error("Напрямок ордера змінився; перевірте реверсний режим і повторіть підтвердження");
       await this.enterLocked(signal, false);
     });
   }
@@ -332,9 +492,10 @@ export class Trading {
     const s = this.settings(),
       b = this.book(s.mode),
       now = Date.now();
-    if (automatic && (!s.autoEntries || !tradingScheduleState(s.tradingSchedule, now).allowed))
+    if (this.sources && !this.sources.allowsEntry(signal, s)) throw new Error("Монета відсутня у свіжому дозволеному джерелі h00k.top");
+    if (automatic && (this.stopping || this.entryPauseRequested || !s.autoEntries || !tradingScheduleState(s.tradingSchedule, now).allowed))
       throw new Error("Автоматичні входи призупинено або зараз поза торговим розкладом");
-    if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !Number.isInteger(signal.confidence) ||
+    if (signal.analysisVersion !== FORMATION_ANALYSIS_VERSION || !(signal.source === "hook_regular" ? Number.isFinite(signal.confidence) : Number.isInteger(signal.confidence)) ||
       signal.confidence < 0 || signal.confidence > 100)
       throw new Error("Сигнал потребує нового сканування та оцінювання");
     if (
@@ -350,7 +511,7 @@ export class Trading {
       signal.candleAt > now + 2000
     )
       throw new Error("Сигнал застарів");
-    if (b.pending.length || b.positions.some((p) => p.status !== "active"))
+    if (b.pending.length || b.positions.some((p) => p.status !== "active") || !this.protectionReady(b,s.mode) || !this.paperMonitoringReady(b,s.mode))
       throw new Error("Спочатку потрібно узгодити ордери або захисні рівні");
     if (
       b.positions.length >= s.maxPositions ||
@@ -365,13 +526,14 @@ export class Trading {
       throw new Error("Триває пауза повторного входу для цієї монети");
     const quotes = await this.market.getPrices(s.exchange),
       price = quotes.data[signal.symbol];
-    if (!price || Date.now() - quotes.at > 15_000)
+    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(quotes.at) || Date.now() - quotes.at > 15_000 || quotes.at > Date.now()+2000)
       throw new Error("Немає свіжої ринкової ціни");
     if (
       (Math.abs(price - signal.entryPrice) / signal.entryPrice) * 100 >
       s.slippageTolerancePercent
     )
       throw new Error("Ціна відійшла від точки входу більше дозволеного");
+    if (this.sources && !isInsideHookPlan(signal,price)) throw new Error("Ціна вже за межами торгового плану h00k");
     const direction = s.reverseEnabled
       ? signal.direction === "LONG"
         ? "SHORT"
@@ -404,6 +566,7 @@ export class Trading {
       }
       if (Math.abs(executionPrice - signal.entryPrice) / signal.entryPrice * 100 > s.slippageTolerancePercent)
         throw new Error("Ціна виконання зі стакана перевищує допустиме відхилення");
+      if (this.sources && !isInsideHookPlan(signal,executionPrice)) throw new Error("Ціна виконання вже за межами торгового плану h00k");
       const tier = paper.tiers.find(t => quantity * executionPrice <= t.cap);
       if (!tier || s.leverage > tier.maxLeverage || quantity * executionPrice > s.orderNotionalUsdt * 1.000001 ||
         (market.maxQuantity && quantity > market.maxQuantity)) throw new Error("Обсяг або плече перевищують біржовий ліміт");
@@ -449,11 +612,20 @@ export class Trading {
         s.orderNotionalUsdt,
       );
       await this.gateway.prepare(s.exchange, signal.symbol, s.leverage);
+      if (this.sources) {
+        const latest = await this.market.getPrices(s.exchange), nextPrice = latest.data[signal.symbol];
+        if (!Number.isFinite(latest.at) || Date.now()-latest.at>15_000 || latest.at>Date.now()+2000 ||
+          !isInsideHookPlan(signal,nextPrice) || Math.abs(nextPrice-signal.entryPrice)/signal.entryPrice*100>s.slippageTolerancePercent)
+          throw new Error("Ціна змінилася під час підготовки ордера; вхід скасовано");
+      }
     }
     // Quotes, account reads and exchange preparation may span the session boundary.
     if (Date.now() - signal.candleAt > s.maxSignalAgeSeconds * 1000) throw new Error("Сигнал застарів під час підготовки виконання");
-    if (automatic && !tradingScheduleState(s.tradingSchedule).allowed)
-      throw new Error("Торгова сесія завершилася під час підготовки входу");
+    if (automatic && (this.stopping || this.entryPauseRequested || !this.settings().autoEntries || !tradingScheduleState(s.tradingSchedule).allowed))
+      throw new Error("Автоматичний вхід призупинено або торгова сесія завершилася під час підготовки");
+    if (this.sources && !this.sources.allowsEntry(signal, this.settings())) throw new Error("Формація h00k більше не актуальна; вхід скасовано");
+    if(!this.paperMonitoringReady(b,s.mode) || !this.protectionReady(b,s.mode))
+      throw new Error("Стан відкритих позицій потребує повторної перевірки");
     const intent: Intent = {
       id: orderId(),
       exchange: s.exchange,
@@ -464,6 +636,7 @@ export class Trading {
       stopLoss,
       takeProfit,
       createdAt: Date.now(),
+      maxHoldingSeconds:s.maxHoldingSeconds,
       kind: "entry",
     };
     b.used[signal.id] = now;
@@ -505,7 +678,7 @@ export class Trading {
       if (fill.id) intent.orderId = fill.id;
       this.save("live", b);
       if (
-        ["closed", "canceled"].includes(fill.status) &&
+        ["closed", "canceled", "expired", "rejected"].includes(fill.status) &&
         fill.filled > 0 &&
         fill.average > 0
       )
@@ -536,6 +709,7 @@ export class Trading {
     status: Position["status"],
   ): Position {
     const openedAt = fill.at || intent.createdAt;
+    const holding=intent.maxHoldingSeconds??s.maxHoldingSeconds;
     return {
       id: intent.id,
       exchange: intent.exchange,
@@ -550,8 +724,8 @@ export class Trading {
       stopLoss: intent.stopLoss,
       takeProfit: intent.takeProfit,
       openedAt,
-      expiresAt: s.maxHoldingSeconds
-        ? openedAt + s.maxHoldingSeconds * 1000
+      expiresAt: holding
+        ? openedAt + holding * 1000
         : 0,
       entryFee: fill.fee,
       entryOrderId: fill.id,
@@ -561,23 +735,45 @@ export class Trading {
       unrealizedPnl: 0,
     };
   }
+  private async verifyBybitProtection(p:Position,venue:{direction:string;quantity:number;stopLoss:number;takeProfit:number;protectionReported?:boolean}):Promise<"verified"|"missing"|"unknown"> {
+    if(venue.protectionReported===false || !Number.isFinite(venue.stopLoss) || !Number.isFinite(venue.takeProfit)) return "unknown";
+    if(venue.direction!==p.direction || !sameQuantity(venue.quantity,p.quantity)) return "unknown";
+    if(venue.stopLoss<=0 || venue.takeProfit<=0) return "missing";
+    const expected=await this.gateway.expectedProtection(p.intent);
+    const matches=(a:number,b:number)=>Math.abs(a-b)<=Math.max(Number.EPSILON*Math.max(a,b)*8,Math.abs(b)*1e-10);
+    return matches(venue.stopLoss,expected.stopLoss)&&matches(venue.takeProfit,expected.takeProfit)?"verified":"unknown";
+  }
   private async adoptEntry(b: Book, intent: Intent, fill: Fill, s: Settings) {
+    if(!fill.id || !Number.isFinite(fill.filled) || fill.filled<=0 ||
+       fill.filled>intent.quantity+Math.max(1e-8,intent.quantity*1e-6) ||
+       !Number.isFinite(fill.average) || fill.average<=0 || !Number.isFinite(fill.fee) ||
+       (fill.at!==undefined && (!Number.isFinite(fill.at) || fill.at<=0 || fill.at>Date.now()+5000)))
+      throw new Error("Некоректні дані виконання ордера; потрібна звірка");
     const p = this.position(intent, fill, s, "protecting");
     b.pending = b.pending.filter((x) => x.id !== intent.id);
     b.positions.push(p);
     this.save("live", b);
     try {
+      const levels=await this.gateway.expectedProtection(intent);
+      if(p.direction==="LONG"?!(levels.stopLoss<p.entryPrice && p.entryPrice<levels.takeProfit):
+        !(levels.takeProfit<p.entryPrice && p.entryPrice<levels.stopLoss))
+        throw new Error("Ціна виконання поза захисними рівнями");
       await this.gateway.protection(intent, p.quantity, (id) => {
         if (!p.guards.includes(id)) p.guards.push(id);
         this.save("live", b);
       });
+      if (intent.exchange === "binance") {
+        if(await this.gateway.checkProtection(intent,p.guards,p.quantity)!=="verified")
+          throw new Error("Захисні ордери Binance не підтверджені");
+      }
       if (intent.exchange === "bybit") {
         const account = await this.gateway.account(intent.exchange),
           venue = account.positions.find((x) => x.symbol === p.symbol);
-        if (!venue || venue.stopLoss <= 0 || venue.takeProfit <= 0)
+        if (!venue || await this.verifyBybitProtection(p,venue)!=="verified")
           throw new Error("Захисні рівні Bybit не підтверджені");
       }
       p.status = "active";
+      p.protectionCheck={at:Date.now(),status:"verified"};
       this.save("live", b);
       this.store.log(
         "TRADE",
@@ -590,8 +786,11 @@ export class Trading {
       await this.closeLive(b, p, "PROTECTION_FAILED", s);
     }
   }
-  closePosition(id: string) {
+  closePosition(id: string, expectedMode?: Mode, liveAcknowledged = false) {
     return this.mutex.run(async () => {
+      const mode=this.settings().mode;
+      if (expectedMode !== undefined && (mode !== expectedMode || (mode==="live" && !liveAcknowledged)))
+        throw new Error("Торговий режим змінився або реальне закриття не підтверджено; повторіть запит");
       const s = this.settings(),
         b = this.book(s.mode),
         p = b.positions.find((x) => x.id === id);
@@ -608,11 +807,17 @@ export class Trading {
     if (this.running) this.feed.sync(positions);
     const ids = new Set(this.paperWatched.keys());
     for (const key of this.paperTicks.keys()) if (!ids.has(key)) this.paperTicks.delete(key);
+    for (const key of this.paperGaps) if (!ids.has(key)) this.paperGaps.delete(key);
     const positionIds = new Set(positions.map(p => p.id));
     for (const id of this.paperErrorLog.keys()) if (!positionIds.has(id)) this.paperErrorLog.delete(id);
   }
   private paperTick(exchange: Exchange, symbol: string, tick: PriceTick) {
     const key = `${exchange}:${symbol}`, previous = this.paperTicks.get(key);
+    const watched = this.paperWatched.get(key);
+    if (!watched || !Number.isFinite(tick.at) || tick.at < watched.openedAt || Math.abs(Date.now()-tick.at)>5000) return;
+    if (tick.last !== undefined && (!Number.isFinite(tick.last) || tick.last<=0)) tick={...tick,last:undefined};
+    if (tick.mark !== undefined && (!Number.isFinite(tick.mark) || tick.mark<=0)) tick={...tick,mark:undefined};
+    if (tick.last === undefined && tick.mark === undefined) return;
     if (tick.last !== undefined && tick.at < (previous?.lastAt || 0)) tick = { ...tick, last: undefined };
     if (tick.mark !== undefined && tick.at < (previous?.markAt || 0)) tick = { ...tick, mark: undefined };
     tick = { at: tick.at, ...(tick.last !== undefined ? { last: tick.last } : {}), ...(tick.mark !== undefined ? { mark: tick.mark } : {}) };
@@ -682,21 +887,32 @@ export class Trading {
       if (e.priceSource !== "settlement-mark" && !state.warnings.includes("funding-mark-estimate")) state.warnings.push("funding-mark-estimate");
     }
     state.fundingCheckedAt = end;
+    // Persist each completed interval before fetching the schedule. Never jump over
+    // unprocessed historical intervals after a long outage.
+    this.save("paper", b);
+    if (end < until) throw new Error("Відновлюється історія funding; наступний пакет у наступному циклі");
     const current = await this.market.getContractState(p.exchange, p.symbol);
     this.checkContractState(current);
     state.nextFundingAt = current.nextFundingAt;
     this.save("paper", b);
-    if (end < until) throw new Error("Відновлюється історія funding; наступний пакет у наступному циклі");
   }
   private async monitorPaper(b: Book, p: Position) {
     await this.ensurePaper(p);
     const state = p.paper!, key = `${p.exchange}:${p.symbol}`, tick = this.paperTicks.get(key);
     if (state.closeFill) { await this.finishPaper(b, p, state.closeFill.reference, state.closeFill.reason); return; }
+    if (state.closeTrigger) { await this.finishPaper(b,p,state.closeTrigger.reference,state.closeTrigger.reason); return; }
+    if(tick?.trigger) {
+      state.closeTrigger=tick.trigger;
+      this.save("paper",b);
+      await this.finishPaper(b,p,state.closeTrigger.reference,state.closeTrigger.reason);
+      return;
+    }
     if (Date.now() - state.lastObservedAt > 15000 && !state.warnings.includes("monitoring-gap")) state.warnings.push("monitoring-gap");
-    if (this.paperGaps.delete(key) && !state.warnings.includes("stream-gap")) state.warnings.push("stream-gap");
+    if (this.paperGaps.has(key) && !state.warnings.includes("stream-gap")) state.warnings.push("stream-gap");
     let last = tick?.last, mark = tick?.mark;
-    if (!this.running || !last || !mark || Date.now() - (tick?.markAt || 0) > 5000 || Date.now() - (tick?.lastAt || 0) > 15000) {
+    if (!this.running || this.paperGaps.has(key) || !last || !mark || Date.now() - (tick?.markAt || 0) > 5000 || Date.now() - (tick?.lastAt || 0) > 15000) {
       const current = await this.market.getContractState(p.exchange, p.symbol); this.checkContractState(current);
+      this.paperGaps.delete(key);
       last = current.last; mark = current.mark;
       state.nextFundingAt = Math.min(state.nextFundingAt, current.nextFundingAt);
       state.lastMarkAt = state.lastTradeAt = current.at;
@@ -727,7 +943,11 @@ export class Trading {
   }
   private async finishPaper(b: Book, p: Position, reference: number, reason: string) {
     const state = p.paper!;
-    state.closeTrigger ||= { reason, at: Date.now(), reference };
+    if (!state.closeTrigger) {
+      state.closeTrigger = { reason, at: Date.now(), reference };
+    }
+    p.status="closing";
+    this.save("paper",b); // Persist the first trigger before any network request or latency.
     reason = state.closeTrigger.reason; reference = state.closeTrigger.reference;
     if (!state.closeFill) {
       if (state.latencyMs) await new Promise(resolve => setTimeout(resolve, state.latencyMs));
@@ -739,6 +959,8 @@ export class Trading {
         const book = await this.market.getExecutionBook(p.exchange, p.symbol);
         price = depthFill(book, p.direction === "LONG" ? "sell" : "buy", p.originalQuantity);
       }
+      if (!Number.isFinite(price) || price < 0 || (reason !== "LIQUIDATION" && price === 0))
+        throw new Error("Некоректна розрахункова ціна закриття");
       state.closeFill = { price, at: Date.now(), reference, reason,
         slippage: reason === "LIQUIDATION" ? 0 : (reference - price) * p.quantity * (p.direction === "LONG" ? 1 : -1) };
       if (Math.abs(state.closeFill.at - state.nextFundingAt) <= 5000 && !state.warnings.includes("funding-boundary-estimate")) state.warnings.push("funding-boundary-estimate");
@@ -825,6 +1047,7 @@ export class Trading {
       orderId: undefined,
     };
     p.status = "closing";
+    p.closeReason ||= reason;
     b.pending.push(intent);
     this.save("live", b);
     try {
@@ -832,16 +1055,48 @@ export class Trading {
       intent.orderId = fill.id || undefined;
       this.save("live", b);
       // Acknowledgement, including a filled market response, is not proof that the position is now flat.
-      if (["closed", "canceled", "rejected"].includes(fill.status))
+      if (["closed", "canceled", "rejected", "expired"].includes(fill.status))
         b.pending = b.pending.filter((x) => x.id !== intent.id);
       this.save("live", b);
     } catch (e: any) {
-      intent.error = "Закриття очікує звірки з біржею";
+      if (definitiveRejection(e)) {
+        // The exchange explicitly rejected this request; there is no unknown fill to reconcile.
+        // A later cycle may retry only after fetching the actual remaining position.
+        b.pending = b.pending.filter(x=>x.id!==intent.id);
+      } else {
+        intent.error = "Закриття очікує звірки з біржею";
+      }
       this.pause(
         `${p.symbol}: ${exchangeError(e)} під час закриття; позицію не позначено закритою`,
       );
       this.save("live", b);
     }
+  }
+  private async recheckFees(trade:TradeHistoryEntry) {
+    if(!trade.entryOrderId || !trade.closingFillIds?.length || !Number.isFinite(trade.openedAt)) return;
+    const rows=await this.gateway.closingTrades(trade.exchange,trade.symbol,trade.openedAt!,trade.direction);
+    if(!Array.isArray(rows)) throw new Error("Неповна історія комісій");
+    const entrySide=trade.direction==="LONG"?"buy":"sell",exitSide=trade.direction==="LONG"?"sell":"buy";
+    const exitIds=new Set(trade.closingFillIds),seen=new Map<string,typeof rows[number]>();
+    for(const row of rows) {
+      if(!row || !(row.orderId===trade.entryOrderId || exitIds.has(row.id))) continue;
+      if(typeof row.id!=="string" || !row.id || !Number.isFinite(row.quantity) || row.quantity<=0 ||
+         !Number.isFinite(row.fee) || row.feeKnown!==true || !Number.isFinite(row.at) ||
+         row.at<trade.openedAt!-1000 || row.at>trade.closedAt+1000) return;
+      if(exitIds.has(row.id)?row.side!==exitSide:row.side!==entrySide) return;
+      const previous=seen.get(row.id);
+      if(previous && (previous.orderId!==row.orderId || previous.quantity!==row.quantity || previous.fee!==row.fee ||
+        previous.side!==row.side || previous.at!==row.at || previous.price!==row.price)) return;
+      seen.set(row.id,row);
+    }
+    const exits=[...seen.values()].filter(row=>exitIds.has(row.id));
+    const entries=[...seen.values()].filter(row=>!exitIds.has(row.id) && row.orderId===trade.entryOrderId);
+    if(exits.length!==exitIds.size || !sameQuantity(exits.reduce((n,row)=>n+row.quantity,0),trade.quantity) ||
+       !sameQuantity(entries.reduce((n,row)=>n+row.quantity,0),trade.quantity)) return;
+    const entryFee=entries.reduce((n,row)=>n+row.fee,0),exitFee=exits.reduce((n,row)=>n+row.fee,0);
+    if(!Number.isFinite(entryFee+exitFee)) return;
+    trade.entryFee=entryFee;trade.exitFee=exitFee;trade.fee=entryFee+exitFee;
+    trade.netPnl=trade.grossPnl-trade.fee-(trade.fundingCost??0);trade.feesComplete=true;
   }
   private async finishLive(b: Book, p: Position, reason: string) {
     p.status = "reconciling";
@@ -858,13 +1113,27 @@ export class Trading {
       p.openedAt,
       p.direction,
     );
-    const unique = [
-      ...new Map(
-        trades
-          .filter((t) => t.side === (p.direction === "LONG" ? "sell" : "buy"))
-          .map((t) => [t.id, t]),
-      ).values(),
-    ];
+    const validTrade = (t: typeof trades[number]) => typeof t.id === "string" && t.id.length > 0 &&
+      ["buy","sell"].includes(t.side) && Number.isFinite(t.quantity) && t.quantity > 0 &&
+      Number.isFinite(t.price) && t.price > 0 && Number.isFinite(t.fee) &&
+      Number.isFinite(t.at) && t.at >= p.openedAt-1000 && t.at <= Date.now()+5000;
+    if (!Array.isArray(trades) || trades.some(t=>!t || !validTrade(t))) {
+      this.pause(`${p.symbol}: некоректна історія виконань, P&L очікує звірки`);
+      return;
+    }
+    const byId = new Map<string, typeof trades[number]>();
+    for (const trade of trades) {
+      const previous=byId.get(trade.id);
+      if (previous && (previous.quantity!==trade.quantity || previous.price!==trade.price ||
+          previous.side!==trade.side || previous.at!==trade.at || previous.orderId!==trade.orderId ||
+          previous.fee!==trade.fee || previous.feeKnown!==trade.feeKnown)) {
+        this.pause(`${p.symbol}: суперечливі дублікати виконань, P&L очікує звірки`);
+        return;
+      }
+      byId.set(trade.id,trade);
+    }
+    const allFills=[...byId.values()];
+    const unique=allFills.filter(t=>t.side===(p.direction==="LONG"?"sell":"buy") && t.at>=p.openedAt);
     const total = unique.reduce((sum, t) => sum + t.quantity, 0);
     if (!sameQuantity(total, p.originalQuantity)) {
       this.pause(
@@ -874,8 +1143,11 @@ export class Trading {
     }
     const exit =
       unique.reduce((sum, t) => sum + t.price * t.quantity, 0) / total;
-    const entryFills = trades.filter((t) => t.orderId === p.entryOrderId);
-    const entryFee = entryFills.length
+    const entryFills = allFills.filter(t=>p.entryOrderId && t.orderId===p.entryOrderId &&
+      t.side===(p.direction==="LONG"?"buy":"sell"));
+    const entryFeesComplete=entryFills.length>0 && sameQuantity(entryFills.reduce((sum,t)=>sum+t.quantity,0),p.originalQuantity) &&
+      entryFills.every(t=>t.feeKnown===true);
+    const entryFee = entryFeesComplete
       ? entryFills.reduce((sum, t) => sum + t.fee, 0)
       : p.entryFee;
     const gross =
@@ -883,7 +1155,9 @@ export class Trading {
       fee = entryFee + unique.reduce((sum, t) => sum + t.fee, 0);
     const closedAt = Math.max(...unique.map(t => t.at));
     let fundingCost: number | undefined;
-    try { fundingCost = await this.gateway.fundingCost(p.exchange, p.symbol, p.openedAt, closedAt); } catch { /* Never report unavailable funding as a verified zero. */ }
+    try { const value=await this.gateway.fundingCost(p.exchange,p.symbol,p.openedAt,closedAt);
+      if(Number.isFinite(value)) fundingCost=value;
+    } catch { /* Never report unavailable funding as a verified zero. */ }
     b.history.unshift({
       id: p.id,
       exchange: p.exchange,
@@ -904,14 +1178,13 @@ export class Trading {
       netPnl: gross - fee - (fundingCost || 0),
       entryFee, exitFee: fee - entryFee, fundingCost,
       fundingComplete: fundingCost !== undefined && Date.now() - closedAt >= 60000,
-      fundingCheckedAt: Date.now(), executionSource: "venue-fills",
+      fundingCheckedAt: Date.now(), feesCheckedAt:Date.now(), entryOrderId:p.entryOrderId,
+      closingFillIds:unique.map(t=>t.id), executionSource: "venue-fills",
       openedAt: p.openedAt,
       closedAt,
       reason,
       estimated: false,
-      feesComplete:
-        entryFills.length > 0 &&
-        [...entryFills, ...unique].every((t) => t.feeKnown),
+      feesComplete:entryFeesComplete && unique.every(t=>t.feeKnown===true),
     });
     b.history = b.history.slice(0, 1000);
     b.positions = b.positions.filter((x) => x.id !== p.id);
@@ -921,6 +1194,14 @@ export class Trading {
       "TRADE",
       `Реальне закриття ${p.symbol}: відсутність позиції та виконання підтверджено`,
     );
+  }
+  private reconciliationFailure(key:string,message:string) {
+    const now=Date.now();
+    if(this.settings().autoEntries || now-(this.reconciliationWarnings.get(key)??-Infinity)>=60_000) {
+      this.pause(message);
+      this.reconciliationWarnings.set(key,now);
+      while(this.reconciliationWarnings.size>300) this.reconciliationWarnings.delete(this.reconciliationWarnings.keys().next().value!);
+    }
   }
   private async reconcileLive(b: Book, s: Settings) {
     let account = await this.gateway.account(s.exchange);
@@ -936,11 +1217,12 @@ export class Trading {
       return;
     }
     for (const intent of [...b.pending]) {
+      try {
       const fill = await this.gateway.read(intent);
       if (!fill) continue; // Unknown submissions are never blindly repeated.
       if (intent.kind === "entry") {
         if (
-          ["closed", "canceled"].includes(fill.status) &&
+          ["closed", "canceled", "expired", "rejected"].includes(fill.status) &&
           fill.filled > 0 &&
           fill.average > 0
         ) {
@@ -959,8 +1241,18 @@ export class Trading {
         b.pending = b.pending.filter((x) => x.id !== intent.id);
         this.save("live", b);
       }
+      } catch {
+        this.reconciliationFailure(intent.id,`${intent.symbol}: не вдалося звірити ордер; повторне надсилання заблоковано`);
+      }
     }
-    for (const p of [...b.positions]) {
+    let protectionBudget=2;
+    const priority=(p:Position)=>p.status!=="active" || (p.expiresAt>0 && p.expiresAt<=Date.now()) ||
+      !account.positions.some(v=>v.symbol===p.symbol) ? 0:1;
+    // Oldest observations go first, so slow requests cannot repeatedly starve the tail.
+    const queue=[...b.positions].sort((a,z)=>priority(a)-priority(z) ||
+      (a.protectionCheck?.at||0)-(z.protectionCheck?.at||0));
+    for (const p of queue) {
+      try {
       // Re-fetch after recovering an entry; the first snapshot may predate its execution.
       const fresh =
         b.accountAt! < p.openedAt + 2000
@@ -968,7 +1260,7 @@ export class Trading {
           : account;
       const venue = fresh.positions.find((x) => x.symbol === p.symbol);
       if (!venue) {
-        await this.finishLive(b, p, "EXCHANGE");
+        await this.finishLive(b, p, p.closeReason || "EXCHANGE");
         continue;
       }
       if (
@@ -982,9 +1274,9 @@ export class Trading {
         )
           p.quantity = venue.quantity;
         else {
-          this.pause(
-            `${p.symbol}: кількість або напрям позиції не збігаються з біржею`,
-          );
+          p.protectionCheck={at:Date.now(),status:"unknown"};
+          this.save("live",b);
+          this.reconciliationFailure(p.id,`${p.symbol}: кількість або напрям позиції не збігаються з біржею`);
           continue;
         }
       }
@@ -1001,13 +1293,34 @@ export class Trading {
       if (
         p.status === "closing" ||
         (p.expiresAt > 0 && Date.now() >= p.expiresAt)
-      )
+      ) {
         await this.closeLive(
           b,
           p,
-          p.status === "closing" ? "MANUAL" : "TIME",
+          p.status === "closing" ? p.closeReason || "MANUAL" : "TIME",
           s,
         );
+        continue;
+      }
+      if(p.status==="active" && protectionBudget>0 && Date.now()-(p.protectionCheck?.at||0)>=30_000) {
+        protectionBudget--;
+        const previous=p.protectionCheck?.status;
+        let status:"verified"|"missing"|"unknown"="unknown";
+        try {
+          if(p.exchange==="bybit") {
+            status=await this.verifyBybitProtection(p,venue);
+          } else status=await this.gateway.checkProtection(p.intent,p.guards,p.quantity);
+        } catch { /* Transient network errors are explicitly unknown, never missing. */ }
+        p.protectionCheck={at:Date.now(),status};
+        this.save("live",b);
+        if(status!=="verified" && (previous!==status || this.settings().autoEntries))
+          this.pause(`${p.symbol}: ${status==="missing"?"TP/SL відсутній або завершився":"TP/SL не вдалося перевірити"}. Нові входи призупинено; перевірте позицію на біржі`);
+      }
+      } catch {
+        if(p.status==="active") p.protectionCheck={at:Date.now(),status:"unknown"};
+        this.reconciliationFailure(p.id,`${p.symbol}: звірка позиції не завершена; супровід інших позицій продовжується`);
+        this.save("live",b);
+      }
     }
     this.save("live", b);
   }

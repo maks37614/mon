@@ -300,3 +300,96 @@ test("private paper-data errors redact exchange messages before they reach the u
   }));
   await assert.rejects(gateway.takerRate("binance", "BTCUSDT"), { message: "Біржа: AuthenticationError" });
 });
+
+test("non-finite simulated order quantities cannot produce a fill",()=>{
+  const book={at:Date.now(),bids:[[99,10]],asks:[[101,10]]};
+  assert.throws(()=>depthFill(book,"buy",Infinity),/Некоректний/);
+  assert.throws(()=>depthFill(book,"sell",NaN),/Некоректний/);
+});
+
+test("Bybit symbol-less deltas use the verified topic; socket creation failure can recover",()=>{
+  let now=Date.now();const original=Date.now;Date.now=()=>now;
+  class Socket extends EventTarget { readyState=1; send(_s:string){} close(){} message(data:any){this.dispatchEvent(new MessageEvent("message",{data:JSON.stringify(data)}));} }
+  const socket=new Socket(), ticks:any[]=[];let attempts=0,gaps=0;
+  const feed=new PaperFeed((_e,_s,tick)=>ticks.push(tick),()=>gaps++,()=>{if(++attempts===1)throw Error("offline");return socket as any;});
+  try {const wanted=[{exchange:"bybit" as const,symbol:"BTCUSDT"}];feed.sync(wanted);feed.sync(wanted);assert.equal(attempts,1);assert.equal(gaps,1);
+    now+=2001;feed.sync(wanted);assert.equal(attempts,2);
+    socket.message({topic:"tickers.BTCUSDT",ts:now,data:{lastPrice:"100"}});
+    socket.message({topic:"tickers.BTCUSDT",ts:now,data:{symbol:"ETHUSDT",lastPrice:"1"}});
+    assert.equal(ticks.length,1);assert.equal(ticks[0].last,100);
+  } finally {feed.stop();Date.now=original;}
+});
+test("known paper close resumes without waiting for another price snapshot",async t=>{
+  const f=fixture(t);await f.trading.enter("signal");const p=f.trading.snapshot().positions[0];
+  const b=f.store.get<any>("book:paper",null);b.positions[0].paper.closeTrigger={reason:"SL",at:Date.now(),reference:99};f.store.set("book:paper",b);
+  f.market.getContractState=async()=>{throw Error("price stream offline");};
+  await f.restart().monitor();assert.equal(f.trading.snapshot().positions.length,0);assert.equal(f.trading.snapshot().history[0].reason,"SL");
+});
+test("old pre-entry tick cannot trigger a stop on a new position",async t=>{
+  const f=fixture(t);await f.trading.enter("signal");const p=f.trading.snapshot().positions[0];
+  (f.trading as any).paperTick("binance","BTCUSDT",{at:p.openedAt-1,last:1,mark:1});await f.trading.monitor();
+  assert.equal(f.trading.snapshot().positions.length,1);assert.equal(f.trading.snapshot().history.length,0);
+});
+
+test("Bybit trade batches preserve a short stop crossing and reject wrong or stale trades",()=>{
+ class Socket extends EventTarget {readyState=1;sent:string[]=[];send(s:string){this.sent.push(s)}close(){}message(data:any){this.dispatchEvent(new MessageEvent("message",{data:JSON.stringify(data)}))}}
+ const socket=new Socket(),ticks:any[]=[];const feed=new PaperFeed((_e,_s,t)=>ticks.push(t),()=>{},()=>socket as any);
+ const at=Date.now();
+ try {
+  feed.sync([{exchange:"bybit",symbol:"BTCUSDT"}]);socket.dispatchEvent(new Event("open"));
+  assert.ok(socket.sent[0].includes("publicTrade.BTCUSDT"));
+  socket.message({topic:"publicTrade.BTCUSDT",ts:at,data:[{s:"BTCUSDT",T:at,p:"101"},{s:"BTCUSDT",T:at-1,p:"99"},{s:"ETHUSDT",T:at,p:"1"},{s:"BTCUSDT",T:at-6000,p:"1"}]});
+  assert.deepEqual(ticks.map(t=>t.last),[99,101]);
+  socket.message({topic:"tickers.BTCUSDT",ts:at,data:{lastPrice:"102",markPrice:"100.1"}});
+  assert.equal(ticks[2].last,undefined);assert.equal(ticks[2].mark,100.1);
+ }finally{feed.stop()}
+});
+test("latched websocket crossing closes without fresh REST ticker",async t=>{
+ const f=fixture(t);await f.trading.enter("signal");
+ const internal=f.trading as any;
+ internal.paperTicks.set("binance:BTCUSDT",{at:Date.now(),trigger:{at:Date.now(),reference:99,reason:"SL"}});
+ f.market.getContractState=async()=>{throw Error("ticker unavailable")};
+ await f.trading.monitor();
+ assert.equal(f.trading.snapshot().positions.length,0);
+ assert.equal(f.trading.snapshot().history[0].reason,"SL");
+});
+
+test("stale paper monitoring blocks additional entries without removing positions",async t=>{
+ const f=fixture(t);await f.trading.enter("signal");
+ const b=f.store.get<any>("book:paper",null);b.positions[0].paper.lastObservedAt=Date.now()-16000;
+ f.store.set("book:paper",b);
+ assert.ok(f.trading.snapshot().formations?.some(x=>x.entryReasons.includes("Очікування актуальних цін відкритих позицій")));
+ assert.equal(f.trading.snapshot().positions.length,1);
+});
+
+test("a failed paper price refresh immediately blocks new entry until recovery",async t=>{
+ const f=fixture(t);await f.trading.enter("signal");
+ const read=f.market.getContractState;
+ f.market.getContractState=async()=>{throw Error("offline")};
+ await f.trading.monitor();
+ assert.ok(f.trading.snapshot().formations?.some(x=>x.entryReasons.includes("Очікування актуальних цін відкритих позицій")));
+ f.market.getContractState=read;
+ await f.trading.monitor();
+ assert.ok(!f.trading.snapshot().formations?.some(x=>x.entryReasons.includes("Очікування актуальних цін відкритих позицій")));
+ assert.equal(f.trading.snapshot().positions.length,1);
+});
+
+test("funding ledger rejects null amounts and conflicting duplicate ids",async t=>{
+ const {store}=fixture(t);const vault=new Vault(store,randomBytes(32).toString("base64"));vault.save("binance","fixture","fixture");
+ const row={symbol:"BTCUSDT",time:1000,tranId:"funding-1",income:"-0.5",asset:"USDT"};
+ let data:any[]=[row,row];
+ const gateway=new ExchangeGateway(vault,async()=>({loadMarkets:async()=>{},fapiPrivateGetIncome:async()=>data}));
+ assert.equal(await gateway.fundingCost("binance","BTCUSDT",0,2000),.5);
+ data=[row,{...row,income:"-0.6"}];await assert.rejects(gateway.fundingCost("binance","BTCUSDT",0,2000),/дублікати/);
+ data=[{...row,income:null}];await assert.rejects(gateway.fundingCost("binance","BTCUSDT",0,2000),/Некоректне/);
+});
+
+test("public risk tier reads share in-flight requests and cache only valid data",async()=>{
+ let calls=0;
+ const market=new MarketData(()=>({...DEFAULT_SETTINGS,requestsPerSecond:1e6}),async()=>{
+  calls++;return Response.json({retCode:0,result:{list:[{symbol:"BTCUSDT",riskLimitValue:"100000",maintenanceMargin:"0.5",initialMargin:"1",maxLeverage:"100",mmDeduction:"0"}]}});
+ });
+ const both=await Promise.all([market.getPublicRiskTiers("BTCUSDT"),market.getPublicRiskTiers("BTCUSDT")]);
+ assert.equal(calls,1);assert.deepEqual(both[0],both[1]);
+ await market.getPublicRiskTiers("BTCUSDT");assert.equal(calls,1);
+});

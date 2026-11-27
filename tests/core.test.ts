@@ -14,6 +14,7 @@ import {
   type Settings,
 } from "../backend/config";
 import { Trading } from "../backend/trading";
+import { HookFormationSources } from "../backend/hookFormationSources";
 import { MarketData } from "../backend/market";
 import { Scanner } from "../backend/scanner";
 import { detectFormations } from "../backend/patterns";
@@ -124,11 +125,13 @@ function fixture(t: any, mode: "paper" | "live" = "paper") {
       return fill;
     },
     read: async (intent: any) => broker.orders.get(intent.id) || null,
+    expectedProtection:async(i:any)=>({stopLoss:i.stopLoss,takeProfit:i.takeProfit}),
     protection: async (_i: any, _q: any, saved: any) => {
       if (broker.guardFailed) throw new Error("fixture guard rejection");
       saved("sl-1", "stopLoss");
       saved("tp-1", "takeProfit");
     },
+    checkProtection: async () => "verified",
     cancelProtection: async () => {},
     closingTrades: async () => [
       {
@@ -790,4 +793,251 @@ test("HTTP authentication, CSRF, secret redaction and cron authorization protect
   await runtime.scanner.task;
   assert.ok(runtime.store.get<any>("scanner", {}).lastCronAt > 0);
   assert.equal(runtime.store.get<any>("scanner", {}).lastTrigger, "cron");
+});
+
+test("explicit close rejection does not leave a phantom pending order; unknown close does",async t=>{
+  const f=fixture(t,"live"); await f.trading.enter("signal-1");
+  const id=f.trading.snapshot().positions[0].id;
+  const submit=f.broker.submit; let rejected=0;
+  f.broker.submit=async(intent:any)=>{if(intent.kind==="close" && rejected++===0)throw Object.assign(new Error("rejected"),{name:"InvalidOrder"});return submit(intent);};
+  await f.trading.closePosition(id);
+  assert.equal(f.trading.snapshot().pending.length,0);assert.equal(f.trading.snapshot().positions.length,1);
+  await f.trading.monitor();assert.equal(f.broker.positions.length,0);
+});
+test("exchange account rejects malformed active positions or missing wallet instead of treating them as flat",async t=>{
+  const {store}=storage(t),vault=new Vault(store,randomBytes(32).toString("base64"));vault.save("binance","fixture","fixture");
+  let balance:any={USDT:{free:100,total:100}},positions:any=[];
+  const client:any={loadMarkets:async()=>{},fetchBalance:async()=>balance,fetchPositions:async()=>positions};
+  const gateway=new ExchangeGateway(vault,async()=>client);
+  assert.equal((await gateway.account("binance")).positions.length,0);
+  balance={};await assert.rejects(gateway.account("binance"),/Неповна/);
+  balance={USDT:{free:100,total:100}};positions=[{contracts:1,side:"unknown",entryPrice:100}];await assert.rejects(gateway.account("binance"),/Некоректні/);
+});
+
+test("credential replacement waits for verification and never inherits the old key verification",async t=>{
+  const f=fixture(t,"paper");f.vault.save("binance","old-key","old-secret");
+  let release!:()=>void, started!:()=>void;const ready=new Promise<void>(r=>{started=r;});
+  f.broker.account=async()=>{started();await new Promise<void>(r=>{release=r;});return {free:100,total:100,positions:[]};};
+  f.broker.invalidate=()=>{};
+  const verification=f.trading.verifyCredentials("binance");await ready;
+  const replacement=f.trading.saveCredentials("binance","new-key","new-secret");
+  assert.equal(f.vault.load("binance")!.apiKey,"old-key");release();await verification;await replacement;
+  assert.equal(f.vault.load("binance")!.apiKey,"new-key");assert.equal(f.vault.status("binance").verified,false);
+});
+
+test("live history rejects conflicting duplicate fills and preserves the actual close reason",async t=>{
+  const f=fixture(t,"live");await f.trading.enter("signal-1");const p=f.trading.snapshot().positions[0];
+  await f.trading.closePosition(p.id);
+  const fill={id:"close-duplicate",side:"sell",quantity:p.quantity,price:101,fee:0.01,at:Date.now()};
+  f.broker.closingTrades=async()=>[fill,{...fill,price:102}];await f.trading.monitor();
+  assert.equal(f.trading.snapshot().history.length,0);assert.equal(f.trading.snapshot().positions.length,1);
+  f.broker.closingTrades=async()=>[fill,fill];const restarted=new Trading(f.store,f.market,f.vault,f.broker,true);await restarted.monitor();
+  assert.equal(restarted.snapshot().history.length,1);assert.equal(restarted.snapshot().history[0].reason,"MANUAL");
+});
+
+test("empty auto-entry cycles do not consume the interval before a signal arrives",async t=>{
+ const f=fixture(t,"paper");f.store.set("settings",{...f.trading.settings(),autoEntries:true});f.store.set("signals",[]);
+ await f.trading.monitor();assert.equal(f.store.get<any>("book:paper",{lastEntryAt:0}).lastEntryAt,0);
+ f.store.set("signals",[signal()]);await f.trading.monitor();assert.equal(f.trading.snapshot().positions.length,1);
+});
+
+test("manual order confirmation is checked inside the trading queue",async t=>{
+ const f=fixture(t,"paper");await assert.rejects(f.trading.enter("signal-1","live",true),/режим змінився/);
+ assert.equal(f.trading.snapshot().positions.length,0);
+ await f.trading.enter("signal-1","paper",false);const p=f.trading.snapshot().positions[0];
+ await assert.rejects(f.trading.closePosition(p.id,"live",true),/режим змінився/);
+ assert.equal(f.trading.snapshot().positions.length,1);
+ await f.trading.closePosition(p.id,"paper",false);assert.equal(f.trading.snapshot().positions.length,0);
+});
+
+
+test("automatic h00k source entry respects confirmation, pause and duplicate guard in both modes",async t=>{
+  for (const mode of ["paper","live"] as const) {
+    const f=fixture(t,mode);
+    const now=Date.now(),close=Math.floor(now/60000)*60000;
+    const validation={enoughData:true,finiteData:true,closedCandleOnly:true,lookAheadSafe:true,
+      passed:false,confirmed:true,breakoutConfirmed:true,entryMode:"BREAKOUT",
+      regularPlan:{breakoutClosedAt:close,structureActive:true,entryExpired:false,afterEntry:[]},
+      confluence:{total:90}};
+    const coin={symbol:"BTCUSDT",exchange:"binance",marketType:"futures",timeframe:"1m",quoteAsset:"USDT",
+      currentPrice:100,lastUpdated:now,formationData:{contiguous:true,collectedAt:now,lastClosedAt:close},
+      formations:[{id:"auto-site-1",patternKey:"double_bottom",bias:"bullish",status:"breakout",
+        validation,levels:{entryPrice:100,stopLossPrice:99,targetPrice:102},detectedAt:close}]};
+    const source=new HookFormationSources((async()=>Response.json({success:true,data:[coin]})) as typeof fetch);
+    const bot=new Trading(f.store,f.market,f.vault,f.broker,true,source);
+    await bot.updateSettings({autoEntries:true,confirmedOnly:true});
+    await source.refresh(bot.settings());await bot.monitor();
+    assert.equal(bot.snapshot().positions.length,0);
+    validation.passed=true;source.invalidate();await source.refresh(bot.settings());
+    await bot.updateSettings({autoEntries:false});await bot.monitor();
+    assert.equal(bot.snapshot().positions.length,0);
+    await bot.updateSettings({autoEntries:true});await bot.monitor();
+    assert.equal(bot.snapshot().positions.length,1);
+    assert.equal(bot.snapshot().positions[0].symbol,"BTCUSDT");
+    assert.equal(f.broker.submitted.length,mode==="live"?1:0);
+    await bot.monitor();assert.equal(bot.snapshot().positions.length,1);
+    assert.equal(f.broker.submitted.length,mode==="live"?1:0);
+  }
+});
+test("a cooldown-only candidate does not consume the automatic entry interval",async t=>{
+  const f=fixture(t,"paper");
+  await f.trading.updateSettings({autoEntries:true,entryCooldownSeconds:900});
+  f.store.set("book:paper",{balance:1000,startBalance:1000,positions:[],history:[],pending:[],used:{},
+    lastEntries:{BTCUSDT:Date.now()},lastEntryAt:0});
+  await f.trading.monitor();
+  assert.equal(f.store.get<any>("book:paper",{}).lastEntryAt,0);
+  assert.equal(f.trading.snapshot().positions.length,0);
+});
+
+test("loss of an active Binance protection pauses new entries without inventing a close fill",async t=>{
+  const f=fixture(t,"live");
+  await f.trading.enter("signal-1");
+  await f.trading.updateSettings({autoEntries:true});
+  const b=f.store.get<any>("book:live",{});
+  b.positions[0].protectionCheck.at=Date.now()-31000;f.store.set("book:live",b);
+  f.broker.checkProtection=async()=>"missing";
+  await f.trading.monitor();
+  assert.equal(f.trading.settings().autoEntries,false);
+  assert.equal(f.trading.snapshot().positions[0].protectionCheck?.status,"missing");
+  assert.equal(f.trading.snapshot().history.length,0);
+  assert.equal(f.broker.submitted.length,1);
+  await assert.rejects(f.trading.enter("signal-1"),/узгодити/);
+});
+
+test("pause requested during an automatic quote read prevents order submission",async t=>{
+  const f=fixture(t,"paper");
+  await f.trading.updateSettings({autoEntries:true});
+  let started!:()=>void,release!:()=>void;
+  const ready=new Promise<void>(r=>{started=r;});
+  f.market.getPrices=async()=>{started();await new Promise<void>(r=>{release=r;});return {at:Date.now(),data:{BTCUSDT:100}};};
+  const cycle=f.trading.monitor();await ready;
+  const pause=f.trading.updateSettings({autoEntries:false});
+  release();await cycle;await pause;
+  assert.equal(f.trading.snapshot().positions.length,0);
+  assert.equal(f.trading.settings().autoEntries,false);
+});
+
+test("manual confirmation rejects a changed reverse direction",async t=>{
+ const f=fixture(t,"paper");await f.trading.updateSettings({reverseEnabled:true});
+ await assert.rejects(f.trading.enter("signal-1","paper",false,"LONG"),/Напрямок/);
+ assert.equal(f.trading.snapshot().positions.length,0);
+ await f.trading.enter("signal-1","paper",false,"SHORT");
+ assert.equal(f.trading.snapshot().positions[0].direction,"SHORT");
+});
+
+test("late fee reconciliation matches original entry and exact exit fills without changing wallet",async t=>{
+ const f=fixture(t,"live");await f.trading.enter("signal-1");
+ const p=f.trading.snapshot().positions[0];await f.trading.closePosition(p.id);
+ const at=Date.now(),exit={id:"exit-a",orderId:"close-a",side:"sell",quantity:p.quantity,price:101,fee:0,feeKnown:false,at};
+ f.broker.closingTrades=async()=>[exit];await f.trading.monitor();
+ const provisional=f.trading.snapshot().history[0];assert.equal(provisional.feesComplete,false);
+ const balance=f.trading.snapshot().stats.balance,orders=f.broker.submitted.length;
+ f.broker.closingTrades=async()=>[{id:"entry-a",orderId:p.entryOrderId,side:"buy",quantity:p.quantity,price:100,fee:.012,feeKnown:true,at:p.openedAt},{...exit,fee:.016,feeKnown:true}];
+ t.mock.method(Date,"now",()=>at+61000);await f.trading.monitor();
+ const final=f.trading.snapshot().history[0];assert.equal(final.feesComplete,true);assert.ok(Math.abs(final.fee-.028)<1e-9);
+ assert.equal(f.trading.snapshot().stats.balance,balance);assert.equal(f.broker.submitted.length,orders);
+});
+
+
+test("malformed live entry fill is retained for reconciliation and never adopted",async t=>{
+ const f=fixture(t,"live"),submit=f.broker.submit;
+ f.broker.submit=async(intent:any)=>{const fill=await submit(intent);return {...fill,filled:intent.quantity*2};};
+ await assert.rejects(f.trading.enter("signal-1"));
+ const state=f.trading.snapshot();
+ assert.equal(state.positions.length,0);assert.equal(state.pending.length,1);
+ assert.equal(state.settings.autoEntries,false);assert.equal(f.broker.submitted.length,1);
+});
+test("one failed pending-order read does not interrupt reconciliation of other orders",async t=>{
+ const f=fixture(t,"live");
+ const b=f.store.get<any>("book:live",null)??{balance:1000,startBalance:1000,positions:[],history:[],pending:[],used:{},lastEntries:{},lastEntryAt:0};
+ const base={kind:"entry",exchange:"binance",symbol:"BTCUSDT",createdAt:Date.now(),quantity:.25,direction:"LONG",signal:signal(),stopLoss:99,takeProfit:102};
+ b.pending=[{...base,id:"offline"},{...base,id:"canceled"}];f.store.set("book:live",b);
+ const reads:string[]=[];f.broker.read=async(intent:any)=>{reads.push(intent.id);if(intent.id==="offline")throw Error("offline");return {id:"cancel",status:"canceled",filled:0,average:0,fee:0}};
+ await f.trading.monitor();
+ assert.deepEqual(reads,["offline","canceled"]);
+ assert.deepEqual(f.trading.snapshot().pending.map(x=>x.id),["offline"]);
+ assert.equal(f.broker.submitted.length,0);
+});
+
+
+test("twenty paper positions open automatically, survive a new Trading instance, and close without venue orders",async t=>{
+ const f=fixture(t,"paper");
+ const symbols=Array.from({length:21},(_,i)=>`COIN${i}USDT`);
+ let price=100;
+ f.market.getPrices=async()=>({at:Date.now(),data:Object.fromEntries(symbols.map(symbol=>[symbol,price]))});
+ f.market.getMarkets=async()=>symbols.map(symbol=>({symbol,quantityStep:.001,minQuantity:.001,minNotional:5,tickSize:.01}));
+ paperVenue(f.market,f.broker,()=>price);
+ await f.trading.updateSettings({autoEntries:true,maxPositions:20,maxHoldingSeconds:0});
+ f.store.set("signals",symbols.map((symbol,i)=>signal({symbol,id:`load-${i}`})));
+ await f.trading.monitor();
+ assert.equal(f.trading.snapshot().positions.length,20);
+ assert.equal(new Set(f.trading.snapshot().positions.map(p=>p.symbol)).size,20);
+ assert.equal(f.broker.submitted.length,0);
+ const bot=new Trading(f.store,f.market,f.vault,f.broker,true);
+ await bot.updateSettings({autoEntries:false});
+ await bot.monitor();assert.equal(bot.snapshot().positions.length,20);
+ price=101;await bot.monitor();
+ assert.equal(bot.snapshot().positions.length,0);assert.equal(bot.snapshot().history.length,20);
+ assert.ok(bot.snapshot().history.every(p=>p.reason==="TP"));
+ assert.equal(f.broker.submitted.length,0);
+});
+test("live protection verification selects the oldest checks within the per-cycle budget",async t=>{
+ const f=fixture(t,"live");
+ await f.trading.enter("signal-1");
+ const b=f.store.get<any>("book:live",null),p=b.positions[0],v=f.broker.positions[0],now=Date.now();
+ b.positions=Array.from({length:20},(_,i)=>({...structuredClone(p),id:`guard-${i}`,symbol:`COIN${i}USDT`,openedAt:now-60000,expiresAt:0,
+  intent:{...p.intent,id:`guard-${i}`,symbol:`COIN${i}USDT`},protectionCheck:{at:now-31000-i*1000,status:"verified"}}));
+ f.store.set("book:live",b);
+ f.broker.positions=b.positions.map((p:any)=>({...v,symbol:p.symbol}));
+ const checked:string[]=[];f.broker.checkProtection=async(i:any)=>{checked.push(i.symbol);return "verified"};
+ await f.trading.monitor();
+ assert.deepEqual(checked,["COIN19USDT","COIN18USDT"]);
+ await f.trading.monitor();
+ assert.deepEqual(checked,["COIN19USDT","COIN18USDT","COIN17USDT","COIN16USDT"]);
+ assert.equal(f.trading.snapshot().positions.length,20);
+});
+
+test("Bybit protection with changed levels is not verified and pauses entries",async t=>{
+ const f=fixture(t,"live");
+ f.vault.save("bybit","fixture-key","fixture-secret");f.vault.verify("bybit");
+ await f.trading.updateSettings({exchange:"bybit"});
+ f.store.set("signals",[signal({exchange:"bybit"})]);
+ await f.trading.enter("signal-1");
+ const b=f.store.get<any>("book:live",null);b.positions[0].protectionCheck.at=Date.now()-31000;f.store.set("book:live",b);
+ f.broker.positions[0].stopLoss*=.98;
+ await f.trading.updateSettings({autoEntries:true});
+ await f.trading.monitor();
+ assert.equal(f.trading.settings().autoEntries,false);
+ assert.equal(f.trading.snapshot().positions[0].protectionCheck?.status,"unknown");
+ assert.equal(f.broker.submitted.length,1);
+});
+test("pending order retains its original holding duration after settings change",async t=>{
+ const f=fixture(t,"live");await f.trading.updateSettings({maxHoldingSeconds:120});
+ f.broker.unknown=true;await assert.rejects(f.trading.enter("signal-1"));
+ await f.trading.updateSettings({maxHoldingSeconds:600});
+ await new Trading(f.store,f.market,f.vault,f.broker,true).monitor();
+ const p=f.trading.snapshot().positions[0];assert.equal(p.expiresAt-p.openedAt,120000);
+ assert.equal(f.broker.submitted.length,1);
+});
+
+test("Binance guard verification checks the actual algo order fields and partial fill quantity",async t=>{
+ const {store}=storage(t),vault=new Vault(store,randomBytes(32).toString("base64"));vault.save("binance","fixture","fixture");
+ const market={id:"BTCUSDT",symbol:"BTC/USDT:USDT",swap:true,linear:true,settle:"USDT",contractSize:1};
+ const intent:any={id:"entry",exchange:"binance",symbol:"BTCUSDT",direction:"LONG",quantity:.25,stopLoss:99.75,takeProfit:100.45};
+ let patch:any={};
+ const client:any={loadMarkets:async()=>{},markets:{[market.symbol]:market},market:()=>market,priceToPrecision:(_s:string,p:number)=>p.toFixed(2),
+ fetchOrder:async(_id:any,_s:any,p:any)=>{const sl=p.clientOrderId.endsWith("-sl");return {id:sl?"sl":"tp",status:"open",symbol:market.symbol,info:{symbol:market.id,clientAlgoId:p.clientOrderId,side:"SELL",orderType:sl?"STOP_MARKET":"TAKE_PROFIT_MARKET",reduceOnly:true,positionSide:"BOTH",workingType:"CONTRACT_PRICE",triggerPrice:sl?"99.75":"100.45",quantity:"0.1",...patch}}}};
+ const gateway=new ExchangeGateway(vault,async()=>client);
+ assert.equal(await gateway.checkProtection(intent,["sl","tp"],.1),"verified");
+ for(const bad of [{reduceOnly:false},{side:"BUY"},{triggerPrice:"90"},{quantity:".25"},{workingType:"MARK_PRICE"},{positionSide:"LONG"},{clientAlgoId:"other"}]){
+  patch=bad;await assert.rejects(gateway.checkProtection(intent,["sl","tp"],.1),/не підтверджені/);
+ }
+});
+test("fill outside protective prices cannot be marked active",async t=>{
+ const f=fixture(t,"live"),submit=f.broker.submit;
+ f.broker.submit=async(i:any)=>{const fill=await submit(i);return i.kind==="entry"?{...fill,average:101}:fill};
+ await f.trading.enter("signal-1");
+ assert.equal(f.trading.snapshot().positions[0].status,"closing");
+ assert.equal(f.trading.settings().autoEntries,false);
+ assert.deepEqual(f.broker.submitted.map((i:any)=>i.kind),["entry","close"]);
 });

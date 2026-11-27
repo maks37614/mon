@@ -3,6 +3,7 @@ import type { Store } from "./store";
 import type { MarketData } from "./market";
 import { detectFormations } from "./patterns";
 import { formationIsVisible, signalAllowsEntry } from "./formationState";
+import type { HookFormationSources } from "./hookFormationSources";
 
 export class Scanner {
   running = false;
@@ -10,13 +11,14 @@ export class Scanner {
   constructor(
     private store: Store,
     private market: MarketData,
+    private sources?: HookFormationSources,
   ) {}
   private saveStatus(status: any) {
     const latest = this.store.get<any>("scanner", {});
     this.store.set("scanner", { ...status, lastCronAt: latest.lastCronAt || status.lastCronAt });
   }
   start(force = false, source: "manual" | "cron" | "internal" = "manual") {
-    const settings = this.store.get("settings", DEFAULT_SETTINGS);
+    const settings = { ...DEFAULT_SETTINGS, ...this.store.get("settings", DEFAULT_SETTINGS) };
     let state = this.store.get<any>("scanner", {});
     const now = Date.now();
     if (source === "cron") {
@@ -52,10 +54,22 @@ export class Scanner {
   private async run(settings: Settings, old: any) {
     const signature = `analysis${FORMATION_ANALYSIS_VERSION}:interleaved:${settings.exchange}:${settings.timeframes.join(",")}:${settings.candleLimit}`;
     let cursor = old.signature === signature ? old.cursor || 0 : 0;
+    if (this.sources) {
+      await this.sources.refresh(settings);
+      const latest = {...DEFAULT_SETTINGS,...this.store.get("settings",DEFAULT_SETTINGS)};
+      const signals = this.sources.signals(latest);
+      this.store.set("signals", signals);
+      const count = new Set(signals.map(s=>s.symbol)).size;
+      const sourceErrors = this.sources.diagnostics(latest);
+      this.saveStatus({...old, signature, cursor:0, total:signals.length, symbols:count,
+        processed:signals.length, successful:signals.length, detected:signals.length,
+        running:false, finishedAt:Date.now(), visibleFormations:signals.length,
+        failed:Object.keys(sourceErrors).length,
+        entrySignals:signals.filter(s=>this.sources!.allowsEntry(s,latest)).length, sourceErrors:this.sources.diagnostics(latest)});
+      return;
+    }
     const markets = await this.market.getMarkets(settings.exchange);
-    const tasks = markets.flatMap((m) =>
-      settings.timeframes.map((timeframe) => ({ symbol: m.symbol, timeframe })),
-    );
+    const tasks = markets.flatMap(m=>settings.timeframes.map(timeframe=>({symbol:m.symbol,timeframe})));
     if (!tasks.length) throw new Error("Біржа не повернула монети для сканування");
     cursor %= tasks.length;
     let status: any = {

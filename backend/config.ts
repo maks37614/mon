@@ -14,6 +14,12 @@ export const FORMATIONS = [
   "Falling Wedge",
   "Bull Flag",
   "Bear Flag",
+  "Hammer / Bullish Pinbar",
+  "Shooting Star",
+  "Bullish Engulfing",
+  "Bearish Engulfing",
+  "Level Breakout",
+  "Volatility Squeeze",
 ];
 export type Exchange = "binance" | "bybit";
 export type Mode = "paper" | "live";
@@ -33,6 +39,9 @@ export const DEFAULT_SETTINGS = {
   maxSignalAgeSeconds: 180,
   minScore: 75,
   confirmedOnly: true,
+  hookRegularFormations: true,
+  hookEarlyFormations: false,
+  hookMinVolumeUsd: 0,
   autoEntries: false,
   reverseEnabled: false,
   tradingSchedule: structuredClone(DEFAULT_TRADING_SCHEDULE),
@@ -94,6 +103,7 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
     maxHoldingSeconds: [0, 604800, true],
     maxSignalAgeSeconds: [30, 86400, true],
     minScore: [50, 100, true],
+    hookMinVolumeUsd: [0, 1e15],
     maxPositions: [1, 20, true],
     initialBalance: [10, 1e7],
     orderNotionalUsdt: [5, 100_000],
@@ -105,7 +115,7 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
     paperLatencyMs: [0, 5000, true],
   };
   for (const [k, [min, max, integer]] of Object.entries(ranges)) {
-    const n = raw[k] ?? s[k as keyof Settings];
+    const n = s[k as keyof Settings];
     if (
       typeof n !== "number" ||
       !Number.isFinite(n) ||
@@ -115,7 +125,7 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
     )
       throw new Error(`Параметр ${k}: дозволено ${min}–${max}`);
   }
-  for (const k of ["confirmedOnly", "autoEntries", "reverseEnabled"])
+  for (const k of ["confirmedOnly", "autoEntries", "reverseEnabled", "hookRegularFormations", "hookEarlyFormations"])
     if (typeof s[k as keyof Settings] !== "boolean")
       throw new Error(`Параметр ${k} має бути логічним`);
   if (!["account", "manual"].includes(s.paperFeeMode)) throw new Error("Невідоме джерело комісії симуляції");
@@ -153,6 +163,9 @@ export type Signal = {
   takeProfit: number;
   confidence: number;
   analysisVersion?: number;
+  source?: "hook_regular" | "hook_early";
+  sourceFormationId?: string;
+  sourceStatus?: string;
   scoreParts?: { structure: number; breakout: number; volume: number };
   status: "confirmed" | "watching";
   candleAt: number;
@@ -193,4 +206,7 @@ export type TradeHistoryEntry = {
   executionSource?: string;
   paper?: import("./paperModel").PaperState;
   fundingCheckedAt?: number;
+  feesCheckedAt?: number;
+  entryOrderId?: string;
+  closingFillIds?: string[];
 };

@@ -6,6 +6,7 @@ import path from "node:path";
 import { Store } from "../backend/store";
 import { Vault } from "../backend/security";
 import { Trading } from "../backend/trading";
+import { HookFormationSources } from "../backend/hookFormationSources";
 import { ExchangeGateway } from "../backend/exchange";
 import { paperVenue } from "./paperFixture";
 import { detectFormations } from "../backend/patterns";
@@ -50,6 +51,8 @@ function fixture(t: TestContext, overrides: Partial<Settings> = {}, input: Parti
       broker.positions.push({ ...intent, entryPrice: price, currentPrice: price });
       return { id: `stub-${intent.id}`, filled: intent.quantity, average: price, fee: 0.015, status: "closed" };
     },
+    checkProtection:async()=>"verified",
+    expectedProtection:async(i:any)=>({stopLoss:i.stopLoss,takeProfit:i.takeProfit}),
     protection: async (_intent: any, _quantity: any, saved: any) => { saved("stub-sl"); saved("stub-tp"); },
   };
   paperVenue(market, broker, () => price);
@@ -271,3 +274,38 @@ for (const onlyConfirmed of [false, true])
       assert.equal(result.directionScore, 0);
     }
   });
+
+test("source guard rejects stored signals through manual and automatic entry, in paper and live", async t=>{
+  for(const mode of ["paper","live"] as const){
+    const f=fixture(t,{mode});
+    const source=new HookFormationSources((async()=>Response.json({success:true,data:[]})) as typeof fetch);
+    const guarded=new Trading(f.store,f.market,f.vault,f.broker,true,source);
+    await source.refresh(guarded.settings());
+    assert.equal(guarded.snapshot().signals.length,0);
+    await assert.rejects(guarded.enter(f.signal.id),/відсутній/);
+    await guarded.monitor();
+    assert.equal(guarded.snapshot().positions.length,0);
+    assert.equal(f.broker.submitted.length,0);
+  }
+});
+
+test("confirmed-only execution follows h00k validation, not merely the coin or breakout label",async t=>{
+  for(const mode of ["paper","live"] as const){
+    const f=fixture(t,{mode});const now=Date.now(),close=Math.floor(now/60000)*60000;
+    const v={enoughData:true,finiteData:true,closedCandleOnly:true,lookAheadSafe:true,passed:false,confirmed:true,breakoutConfirmed:true,entryMode:"BREAKOUT",regularPlan:{breakoutClosedAt:close},confluence:{total:90}};
+    const coin={symbol:"BTCUSDT",exchange:"binance",marketType:"futures",timeframe:"1m",quoteAsset:"USDT",currentPrice:100,lastUpdated:now,formationData:{contiguous:true,collectedAt:now,lastClosedAt:close},formations:[{id:"site-1",patternKey:"double_bottom",bias:"bullish",status:"breakout",validation:v,levels:{entryPrice:100,stopLossPrice:99,targetPrice:102},detectedAt:close}]};
+    const source=new HookFormationSources((async()=>Response.json({success:true,data:[coin]})) as typeof fetch);
+    const guarded=new Trading(f.store,f.market,f.vault,f.broker,true,source);
+    await source.refresh(guarded.settings());assert.equal(guarded.snapshot().signals.length,0);
+    await assert.rejects(guarded.enter(JSON.stringify(["regular","binance","BTCUSDT","1m","site-1"])),/відсутній/);
+    await guarded.monitor();assert.equal(guarded.snapshot().positions.length,0);assert.equal(f.broker.submitted.length,0);
+    v.passed=true;source.invalidate();await source.refresh(guarded.settings());
+    const signal=guarded.snapshot().signals[0];assert.ok(signal);assert.equal(signal.status,"confirmed");
+    await guarded.enter(signal.id);assert.equal(guarded.snapshot().positions.length,1);assert.equal(f.broker.submitted.length,mode==="live"?1:0);
+  }
+});
+
+test("numeric settings reject null instead of persisting an invalid risk value", async t=>{
+  const f=fixture(t);await assert.rejects(f.trading.updateSettings({orderNotionalUsdt:null}),/Параметр/);
+  assert.equal(f.trading.settings().orderNotionalUsdt,DEFAULT_SETTINGS.orderNotionalUsdt);
+});

@@ -31,7 +31,7 @@ export function depthFill(book: ExecutionBook, side: "buy" | "sell", quantity: n
       (i > 0 && (ascending ? p <= levels[i - 1][0] : p >= levels[i - 1][0]))))
       throw new Error("Некоректна глибина стакана");
   }
-  if (bids[0][0] >= asks[0][0] || !(quantity > 0)) throw new Error("Некоректний стакан або обсяг");
+  if (bids[0][0] >= asks[0][0] || !Number.isFinite(quantity) || !(quantity > 0)) throw new Error("Некоректний стакан або обсяг");
   let remaining = quantity, notional = 0;
   for (const [price, available] of side === "buy" ? asks : bids) {
     const filled = Math.min(remaining, available);
@@ -39,9 +39,12 @@ export function depthFill(book: ExecutionBook, side: "buy" | "sell", quantity: n
     if (remaining <= quantity * 1e-10) break;
   }
   if (remaining > quantity * 1e-10) throw new Error("Недостатня видима ліквідність для повного виконання");
-  return notional / quantity;
+  const price = notional / quantity;
+  if (!Number.isFinite(price) || price <= 0) throw new Error("Некоректна ціна виконання");
+  return price;
 }
 export function maintenance(tiers: RiskTier[], notional: number) {
+  if (!Number.isFinite(notional) || notional < 0) throw new Error("Некоректний номінал для розрахунку маржі");
   const tier = tiers.find(t => notional <= t.cap);
   if (!tier) throw new Error("Обсяг перевищує відомі рівні ризику");
   return Math.max(0, notional * tier.rate - tier.deduction);
@@ -49,14 +52,24 @@ export function maintenance(tiers: RiskTier[], notional: number) {
 export function liquidationPrice(p: { direction: "LONG" | "SHORT"; entryPrice: number; quantity: number }, state: PaperState) {
   const sign = p.direction === "LONG" ? 1 : -1;
   const margin = state.marginBalance ?? state.initialMargin - state.fundingCost;
-  for (const tier of state.tiers) {
+  if (!Number.isFinite(margin) || !Number.isFinite(p.quantity) || p.quantity <= 0 ||
+    !Number.isFinite(p.entryPrice) || p.entryPrice <= 0) throw new Error("Некоректні параметри ліквідації");
+  const reserve = state.closeFeeReserve || 0;
+  for (const [index,tier] of state.tiers.entries()) {
+    const lower = state.tiers[index-1]?.cap || 0;
     const denominator = p.quantity * (sign - tier.rate);
-    const price = (sign * p.entryPrice * p.quantity - margin - tier.deduction + (state.closeFeeReserve || 0)) / denominator;
-    if (price > 0 && price * p.quantity <= tier.cap &&
-      maintenance(state.tiers, price * p.quantity) === Math.max(0, price * p.quantity * tier.rate - tier.deduction)) return price;
+    const price = (sign * p.entryPrice * p.quantity - margin - tier.deduction + reserve) / denominator;
+    const zeroMaintenancePrice = (sign * p.entryPrice * p.quantity - margin + reserve) / (sign*p.quantity);
+    for (const candidate of [price,zeroMaintenancePrice]) {
+      const notional=candidate*p.quantity;
+      if (!(candidate>0) || notional<=lower || notional>tier.cap) continue;
+      const equity=margin+(candidate-p.entryPrice)*p.quantity*sign;
+      const required=maintenance(state.tiers,notional)+reserve;
+      if (Math.abs(equity-required)<=Math.max(1e-8,notional*1e-10)) return candidate;
+    }
   }
   // A fully funded 1x long may have no positive liquidation threshold.
-  if (p.direction === "LONG" && margin >= p.entryPrice * p.quantity) return 0;
+  if (p.direction === "LONG" && margin >= p.entryPrice * p.quantity + reserve) return 0;
   throw new Error("Немає рівня ризику для розрахунку ліквідації");
 }
 export function liquidatable(p: { direction: "LONG" | "SHORT"; entryPrice: number; quantity: number }, state: PaperState, mark: number) {

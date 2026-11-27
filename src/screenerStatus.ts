@@ -8,6 +8,7 @@ type ScanStatus = {
   successful?: number;
   failed?: number;
   error?: string;
+  sourceCoverage?: { supported:boolean; fresh:boolean; refreshing:boolean; error:string|null }[];
 };
 
 export function scanIsOverdue(scan: ScanStatus, settings: Settings, now = Date.now()) {
@@ -22,6 +23,12 @@ export function screenerEmptyState(scan: ScanStatus, settings: Settings,
     title: "За цим пошуком формацій немає",
     detail: "Очистіть пошук монети або назви формації, щоб побачити знайдені результати.",
   };
+  if (scan.sourceCoverage) {
+    if (!settings.hookRegularFormations && !settings.hookEarlyFormations) return {title:"Джерела формацій вимкнено",detail:"Увімкніть потрібне джерело в налаштуваннях."};
+    if (scan.sourceCoverage.some(s=>s.error)) return {title:"Частина джерел недоступна",detail:"Перевірте діагностику h00k.top. Застарілі або помилкові дані не дозволяють відкривати позиції."};
+    if (scan.sourceCoverage.some(s=>s.refreshing) || !scan.sourceCoverage.some(s=>s.fresh)) return {title:"Очікуємо свіжі формації h00k.top",detail:"Нові дані з'являться після відповіді джерела."};
+    return {title:"За поточними фільтрами формацій не знайдено",detail:"Свіжі дані отримано. Перевірте таймфрейм, типи формацій, мінімальну оцінку та підтвердження."};
+  }
   if (scan.running) return {
     title: "Сканування триває",
     detail: `Оброблено ${scan.processed || 0} завдань. Результати з’являються під час обробки пакета.`,

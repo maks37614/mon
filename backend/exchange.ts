@@ -35,6 +35,7 @@ export type Intent = {
   stopLoss: number;
   takeProfit: number;
   createdAt: number;
+  maxHoldingSeconds?: number;
   orderId?: string;
   kind: "entry" | "close";
   positionId?: string;
@@ -82,8 +83,10 @@ export class ExchangeGateway {
     this.paperCache.set(key, { at: Date.now(), value }); return value;
   }
   async fundingCost(exchange: Exchange, symbolId: string, from: number, to: number): Promise<number> {
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from<0 || to<from)
+      throw new Error("Некоректний інтервал funding");
     if (to - from > 90 * 86400_000) throw new Error("Історія funding потребує окремого архіву");
-    const c = await this.paperRead(() => this.client(exchange)), seen = new Set<string>(); let cost = 0;
+    const c = await this.paperRead(() => this.client(exchange)), seen = new Map<string,{at:number;value:number}>(); let cost = 0;
     for (let start = from; start <= to; start += 7 * 86400_000) {
       const end = Math.min(to, start + 7 * 86400_000 - 1);
       let cursor = ""; const cursors = new Set<string>();
@@ -91,19 +94,32 @@ export class ExchangeGateway {
         const raw = await this.paperRead<any>(async () => exchange === "binance"
           ? await c.fapiPrivateGetIncome({ symbol: symbolId, incomeType: "FUNDING_FEE", startTime: start, endTime: end, limit: 1000 })
           : await c.privateGetV5ExecutionList({ category: "linear", symbol: symbolId, execType: "Funding", startTime: start, endTime: end, limit: 100, ...(cursor ? { cursor } : {}) }));
-        const rows = exchange === "binance" ? raw : raw.result?.list;
+        if(exchange==="bybit" && raw?.retCode!=null && Number(raw.retCode)!==0) throw new Error("Bybit не підтвердив історію funding");
+        const rows = exchange === "binance" ? raw : raw?.result?.list;
         if (!Array.isArray(rows) || (exchange === "binance" && rows.length >= 1000)) throw new Error("Історія funding неповна");
         for (const row of rows) {
-          const at = Number(exchange === "binance" ? row.time : row.execTime);
-          if (at < from || at > to || row.symbol !== symbolId) continue;
-          const id = String(exchange === "binance" ? row.tranId : row.execId);
-          const value = Number(exchange === "binance" ? row.income : row.execFee);
-          if (!id || id === "undefined" || !Number.isFinite(at) || !Number.isFinite(value) ||
-            (exchange === "binance" && row.asset !== "USDT")) throw new Error("Некоректне біржове нарахування funding");
-          if (seen.has(id)) continue;
-          seen.add(id); cost += exchange === "binance" ? -value : value;
+          const rawAt=exchange==="binance"?row?.time:row?.execTime;
+          const rawId=exchange==="binance"?row?.tranId:row?.execId;
+          const rawValue=exchange==="binance"?row?.income:row?.execFee;
+          const at=Number(rawAt),value=Number(rawValue),id=String(rawId??"");
+          if(rawAt==null || rawAt==="" || rawValue==null || rawValue==="" || !id ||
+             !Number.isSafeInteger(at) || !Number.isFinite(value) || typeof row?.symbol!=="string")
+            throw new Error("Некоректне біржове нарахування funding");
+          if(row.symbol!==symbolId || at<from || at>to) continue;
+          if((exchange==="binance" && row.asset!=="USDT") ||
+             (exchange==="bybit" && row.feeCurrency!=null && row.feeCurrency!=="USDT"))
+            throw new Error("Валюта funding не підтверджена як USDT");
+          const previous=seen.get(id);
+          if(previous) {
+            if(previous.at!==at || previous.value!==value) throw new Error("Суперечливі дублікати funding");
+            continue;
+          }
+          seen.set(id,{at,value});cost+=exchange==="binance"?-value:value;
+          if(!Number.isFinite(cost)) throw new Error("Некоректна сума funding");
         }
-        cursor = exchange === "bybit" ? raw.result?.nextPageCursor || "" : "";
+        const next=exchange==="bybit"?raw.result?.nextPageCursor:"";
+        if(next!=null && typeof next!=="string") throw new Error("Некоректний курсор funding");
+        cursor=next||"";
         if (cursor && cursors.has(cursor)) throw new Error("Повторний курсор funding");
         cursors.add(cursor);
         if (cursors.size > 100) throw new Error("Забагато сторінок funding");
@@ -144,7 +160,7 @@ export class ExchangeGateway {
       return client;
     })();
     this.clients.set(exchange, promise);
-    promise.catch(() => this.clients.delete(exchange));
+    promise.catch(() => { if (this.clients.get(exchange) === promise) this.clients.delete(exchange); });
     return promise;
   }
   private symbol(client: any, symbol: string) {
@@ -160,6 +176,19 @@ export class ExchangeGateway {
       client.fetchBalance({ type: "swap" }),
       client.fetchPositions(undefined, { settleCoin: "USDT" }),
     ]);
+    // Never interpret an incomplete account response as a flat account.
+    if (!Array.isArray(positions) || !balance?.USDT ||
+      balance.USDT.free == null || balance.USDT.total == null ||
+      !Number.isFinite(Number(balance.USDT.free)) || !Number.isFinite(Number(balance.USDT.total)))
+      throw new Error("Неповна відповідь балансу або позицій біржі");
+    if (positions.some((p: any) => !p || p.contracts == null ||
+      !Number.isFinite(Number(p.contracts)) || Number(p.contracts) < 0 ||
+      (Number(p.contracts) > 0 && (!["long","short"].includes(p.side) ||
+        !Number.isFinite(Number(p.contractSize ?? 1)) || Number(p.contractSize ?? 1) <= 0 ||
+        !Number.isFinite(Number(p.entryPrice)) || Number(p.entryPrice) <= 0 ||
+        !Number.isFinite(Number(p.markPrice || p.lastPrice || p.entryPrice)) ||
+        Number(p.markPrice || p.lastPrice || p.entryPrice) <= 0))))
+      throw new Error("Некоректні дані відкритої позиції біржі");
     if (
       positions.some(
         (p: any) => p.hedged === true || Number(p.info?.positionIdx || 0) !== 0,
@@ -183,8 +212,10 @@ export class ExchangeGateway {
           direction: p.side === "long" ? "LONG" : "SHORT",
           entryPrice: Number(p.entryPrice),
           currentPrice: Number(p.markPrice || p.lastPrice || p.entryPrice),
-          stopLoss: Number(p.stopLossPrice || 0),
-          takeProfit: Number(p.takeProfitPrice || 0),
+          stopLoss: Number(p.info?.stopLoss ?? p.stopLossPrice ?? 0),
+          takeProfit: Number(p.info?.takeProfit ?? p.takeProfitPrice ?? 0),
+          protectionReported: (p.info?.stopLoss != null || p.stopLossPrice != null) &&
+            (p.info?.takeProfit != null || p.takeProfitPrice != null),
         })),
     };
   }
@@ -228,6 +259,15 @@ export class ExchangeGateway {
         .reduce((a: number, f: any) => a + Number(f.cost || 0), 0),
       at: Number(raw.lastTradeTimestamp || raw.timestamp || Date.now()),
     };
+  }
+  async expectedProtection(intent:Intent) {
+    const client=await this.client(intent.exchange),symbol=this.symbol(client,intent.symbol);
+    const stopLoss=Number(client.priceToPrecision(symbol,intent.stopLoss));
+    const takeProfit=Number(client.priceToPrecision(symbol,intent.takeProfit));
+    if(!Number.isFinite(stopLoss) || stopLoss<=0 || !Number.isFinite(takeProfit) || takeProfit<=0 ||
+       (intent.direction==="LONG"?stopLoss>=takeProfit:stopLoss<=takeProfit))
+      throw new Error("Некоректні округлені захисні рівні");
+    return {stopLoss,takeProfit};
   }
   async prepare(exchange: Exchange, symbolId: string, leverage: number) {
     const client = await this.client(exchange),
@@ -334,12 +374,54 @@ export class ExchangeGateway {
         );
       if (
         !existing.id ||
-        existing.status === "rejected" ||
-        existing.status === "canceled"
+        existing.status !== "open"
       )
         throw new Error("Захисний ордер не підтверджено");
       onSaved(String(existing.id), type);
     }
+  }
+  private validateBinanceGuard(client:any,symbol:string,intent:Intent,quantity:number,suffix:string,order:any) {
+    const info=order.info??{},market=client.market(symbol);
+    const expectedPrice=Number(client.priceToPrecision(symbol,suffix==="sl"?intent.stopLoss:intent.takeProfit));
+    const rawPrice=info.triggerPrice??info.stopPrice??order.triggerPrice??order.stopPrice;
+    const price=Number(rawPrice);
+    const side=String(info.side??order.side??"").toLowerCase();
+    const type=String(info.orderType??info.type??order.type??"").toUpperCase();
+    const reduceOnly=info.reduceOnly??order.reduceOnly;
+    const rawQuantity=info.quantity??info.origQty??order.amount;
+    const amount=Number(rawQuantity)*Number(market.contractSize||1);
+    const matches=(a:number,b:number)=>Number.isFinite(a)&&Number.isFinite(b)&&Math.abs(a-b)<=Math.max(1e-12,Math.abs(b)*1e-9);
+    if(info.symbol!=null && info.symbol!==intent.symbol ||
+       order.symbol!=null && order.symbol!==symbol ||
+       (info.clientAlgoId??info.clientOrderId??order.clientOrderId)!==`${intent.id}-${suffix}` ||
+       side!==(intent.direction==="LONG"?"sell":"buy") ||
+       type!==(suffix==="sl"?"STOP_MARKET":"TAKE_PROFIT_MARKET") ||
+       !(reduceOnly===true || reduceOnly==="true") ||
+       info.workingType!=="CONTRACT_PRICE" || info.positionSide!=="BOTH" ||
+       !matches(price,expectedPrice) || !(expectedPrice>0) ||
+       !matches(amount,quantity)) throw new Error("Параметри захисного ордера Binance не підтверджені");
+  }
+  /** Read only. A failed request is not evidence that a guard is missing. */
+  async checkProtection(intent: Intent, guardIds: string[],quantity=intent.quantity): Promise<"verified"|"missing"> {
+    if(intent.exchange!=="binance") throw new Error("Перевірка захисту потребує даних позиції Bybit");
+    const client=await this.client(intent.exchange),symbol=this.symbol(client,intent.symbol);
+    for(const suffix of ["sl","tp"]) {
+      let order:any;
+      try {
+        order=await client.fetchOrder(undefined,symbol,{clientOrderId:`${intent.id}-${suffix}`,trigger:true});
+      } catch(error:any) {
+        if(error?.name==="OrderNotFound") return "missing";
+        throw error;
+      }
+      if(!order || !order.id || (order.symbol && order.symbol!==symbol))
+        throw new Error("Неповна відповідь перевірки захисного ордера");
+      if(["closed","canceled","expired","rejected"].includes(order.status)) return "missing";
+      if(order.status!=="open") throw new Error("Невідомий статус захисного ордера");
+      if(guardIds.length!==2 || new Set(guardIds).size!==2 || !guardIds.includes(String(order.id)))
+        throw new Error("Ідентифікатор захисного ордера не збігається");
+      this.validateBinanceGuard(client,symbol,intent,quantity,suffix,order);
+    }
+    return "verified";
   }
   async cancelProtection(
     exchange: Exchange,
@@ -397,6 +479,11 @@ export class ExchangeGateway {
     const c = await this.client(exchange),
       symbol = this.symbol(c, symbolId);
     const trades = await c.fetchMyTrades(symbol, since - 1000, 1000);
+    if (!Array.isArray(trades) || trades.length >= 1000)
+      throw new Error("Історія виконань неповна; потрібна додаткова звірка");
+    if (trades.some((t:any)=>!t || t.id == null || String(t.id)==="" ||
+      !Number.isFinite(t.timestamp) || (t.symbol && t.symbol!==symbol)))
+      throw new Error("Некоректна історія виконань");
     const fills = trades.filter((t: any) => t.timestamp >= since - 1000);
     return fills.map((t: any) => ({
       id: String(t.id),
@@ -404,8 +491,8 @@ export class ExchangeGateway {
       side: t.side,
       quantity: Number(t.amount) * Number(c.market(symbol).contractSize || 1),
       price: Number(t.price),
-      fee: t.fee?.currency === "USDT" ? Number(t.fee.cost || 0) : 0,
-      feeKnown: t.fee?.currency === "USDT",
+      fee: t.fee?.currency === "USDT" && t.fee.cost != null && Number.isFinite(Number(t.fee.cost)) ? Number(t.fee.cost) : 0,
+      feeKnown: t.fee?.currency === "USDT" && t.fee.cost != null && Number.isFinite(Number(t.fee.cost)),
       at: t.timestamp,
     }));
   }

@@ -964,3 +964,6 @@ legend {
 .score-details summary { cursor: pointer; white-space: nowrap; }
 .score-details div { display: grid; gap: 3px; padding-top: 8px; }
 .score-details p { max-width: 300px; white-space: normal; font-size: 12px; line-height: 1.5; }
+
+/* Long diagnostic explanations must not force the entire mobile table wider. */
+.table-wrap td:last-child small { white-space: normal; min-width: 9rem; max-width: 18rem; overflow-wrap: anywhere; }
