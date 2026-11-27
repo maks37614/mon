@@ -10,6 +10,14 @@ type Source = "regular" | "early";
 type Key = { exchange: Exchange; symbol: string; timeframe: string };
 type Row = { symbol: string; until: number; signal: Signal; blocked: boolean; blockReasons: string[] };
 type Rejections = Record<string, number>;
+class HookHttpError extends Error {
+  constructor(readonly status:number,readonly retryAt:number|null) { super("h00k HTTP "+status); }
+}
+function retryAfter(value:string|null,now:number):number|null {
+  if(!value) return null;
+  const at=/^\d+$/.test(value.trim()) ? now+Number(value.trim())*1000 : Date.parse(value);
+  return Number.isFinite(at) && at>now ? Math.min(at,now+300_000) : null;
+}
 type Connection = { lastAttemptAt: number; lastSuccessAt: number | null; consecutiveFailures: number; lastResponseMs: number | null };
 type Snapshot = { rejected: Rejections; rows: Map<string, Row>; startedAt: number; checkedAt: number; receivedCoins: number; receivedPatterns: number; responseMs: number };
 const TYPES: Record<string,string> = {
@@ -140,7 +148,7 @@ export class HookFormationSources {
     const response = await this.fetcher(new URL(path, "https://h00k.top"), {
       ...init, redirect: "error", cache: "no-store", signal: AbortSignal.any([this.generationController.signal,AbortSignal.timeout(45_000)]),
     });
-    if (!response.ok) throw new Error("h00k HTTP " + response.status);
+    if (!response.ok) throw new HookHttpError(response.status,retryAfter(response.headers.get("Retry-After"),this.now()));
     const body = await response.json().catch(error=>{
       if(error instanceof SyntaxError) throw new Error("API h00k повернув некоректний JSON");
       throw error;
@@ -225,7 +233,7 @@ export class HookFormationSources {
         const failures = connection.consecutiveFailures + 1;
         this.connections.set(key, {...connection,consecutiveFailures:failures,lastResponseMs:Math.max(0,failedAt-started)});
         // Retry independently by scope, with bounded backoff; never reuse a failed allowlist.
-        this.retryAt.set(key,failedAt+15_000*2**Math.min(2,failures-1));
+        this.retryAt.set(key,Math.max(failedAt+15_000*2**Math.min(2,failures-1),error instanceof HookHttpError ? error.retryAt??0 : 0));
         this.errors.set(key, error instanceof Error ? (error.name==="TimeoutError" || error.name==="AbortError" ? "Час очікування API h00k вичерпано" : error.message.slice(0,200)) : "Джерело недоступне");
         while (this.errors.size>24) this.errors.delete(this.errors.keys().next().value!);
         while (this.retryAt.size>24) this.retryAt.delete(this.retryAt.keys().next().value!);
