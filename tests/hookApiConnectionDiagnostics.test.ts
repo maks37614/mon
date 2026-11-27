@@ -82,3 +82,32 @@ test("formation API Retry-After delays retries and does not restore stale data",
   assert.equal(calls,3);
   assert.equal(source.coverage(settings)[0].fresh,true);
 });
+
+test("incomplete early job and transient errors preserve the job ID without authorizing trades", async () => {
+  let now=initial;
+  const id="12345678-1234-1234-1234-123456789abc";
+  const calls:string[]=[];
+  const source=new HookFormationSources(async input=>{
+    calls.push(String(input));
+    if(calls.length===2) return new Response("",{status:503});
+    if(calls.length===4) return new Response("",{status:404});
+    return Response.json({success:true,scan:{id,params:{exchange:"binance",marketType:"futures",timeframe:"5m"},status:"running",missingSources:calls.length===1?["candles"]:[],failed:0,data:[]}});
+  },()=>now);
+  const early={...settings,hookRegularFormations:false,hookEarlyFormations:true};
+  await source.refresh(early);
+  assert.equal(source.coverage(early)[0].fresh,false);
+  now+=15_000;
+  await source.refresh(early);
+  assert.match(calls[1],/early\/status\?id=/);
+  now+=30_000;
+  await source.refresh(early);
+  assert.match(calls[2],/early\/status\?id=/);
+  assert.equal(source.coverage(early)[0].fresh,true);
+  assert.deepEqual(source.eligibleSignals(early),[]);
+  now+=30_000;
+  await source.refresh(early);
+  assert.match(calls[3],/early\/status\?id=/);
+  now+=15_000;
+  await source.refresh(early);
+  assert.match(calls[4],/early\/start$/);
+});
