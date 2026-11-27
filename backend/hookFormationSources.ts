@@ -141,7 +141,10 @@ export class HookFormationSources {
       ...init, redirect: "error", cache: "no-store", signal: AbortSignal.any([this.generationController.signal,AbortSignal.timeout(45_000)]),
     });
     if (!response.ok) throw new Error("h00k HTTP " + response.status);
-    const body = await response.json();
+    const body = await response.json().catch(error=>{
+      if(error instanceof SyntaxError) throw new Error("API h00k повернув некоректний JSON");
+      throw error;
+    });
     if (body?.success !== true) throw new Error("Некоректна відповідь h00k");
     return body;
   }
@@ -303,6 +306,8 @@ export class HookFormationSources {
         if(!formationIsVisible(row.signal,settings,now)) {
           if(settings.confirmedOnly && row.signal.status!=="confirmed") add("Вхід ще не підтверджено");
           else if(row.signal.source!=="hook_early" && row.signal.confidence<settings.minScore) add("Оцінка нижче порогу");
+          else if(!settings.formationTypes.includes(row.signal.formation)) add("Тип формації вимкнено");
+          else if(now-row.signal.candleAt>Math.max(tfMs(row.signal.timeframe),settings.maxSignalAgeSeconds*1000)) add("Перевищено максимальний вік сигналу");
           else add("Не відповідає фільтрам видимості");
         } else if(row.blocked) add(row.blockReasons[0]??"Торговий план заблоковано");
         else if(!signalAllowsEntry(row.signal,settings,now)) add("Перевищено максимальний вік сигналу або рання формація");
