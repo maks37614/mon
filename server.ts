@@ -302,6 +302,7 @@ export function createApplication(options: Options) {
     async stop() {
       if (scheduler) clearInterval(scheduler);
       if (sourceTimer) clearInterval(sourceTimer);
+      options.formationSources?.invalidate();
       await trading.stop();
       if (scanner.task) await scanner.task;
       store.close();
