@@ -211,9 +211,19 @@ export class MarketData {
       ? await this.request(exchange, "/fapi/v1/depth", { symbol, limit: 1000 })
       : await this.request(exchange, "/v5/market/orderbook", { category: "linear", symbol, limit: 1000 });
     const row = exchange === "binance" ? raw : raw.result;
+    if (!row || (row.symbol !== undefined && row.symbol !== symbol) || (row.s !== undefined && row.s !== symbol))
+      throw new Error("Стакан іншого контракту або відсутній");
+    const parseLevels = (levels: unknown): number[][] => {
+      if (!Array.isArray(levels) || !levels.length) throw new Error("Відсутня глибина стакана");
+      return levels.map(level => {
+        if (!Array.isArray(level) || level.length !== 2 || level.some(v => typeof v !== "number" && (typeof v !== "string" || !v.trim()))) throw new Error("Некоректний рівень стакана");
+        const values = level.map(Number);
+        if (values.some(v => !Number.isFinite(v) || v <= 0)) throw new Error("Некоректний рівень стакана");
+        return values;
+      });
+    };
     return { at: Number(exchange === "binance" ? raw.T || raw.E : row.ts),
-      bids: (row.bids || row.b || []).map((x: any[]) => x.map(Number)),
-      asks: (row.asks || row.a || []).map((x: any[]) => x.map(Number)) };
+      bids: parseLevels(row.bids ?? row.b), asks: parseLevels(row.asks ?? row.a) };
   }
   getContractState(exchange: Exchange, symbol: string): Promise<ContractState> {
     return this.once(`contract-state:${exchange}:${symbol}`,()=>this.readContractState(exchange,symbol));
@@ -224,7 +234,10 @@ export class MarketData {
         this.request(exchange, "/fapi/v1/premiumIndex", { symbol }),
         this.request(exchange, "/fapi/v2/ticker/price", { symbol }),
       ]);
-      return { at: Number(mark.time), mark: Number(mark.markPrice), last: Number(last.price), nextFundingAt: Number(mark.nextFundingTime) };
+      if ((mark.symbol !== undefined && mark.symbol !== symbol) || (last.symbol !== undefined && last.symbol !== symbol)) throw new Error("Ціни іншого контракту");
+      const markAt = Number(mark.time), lastAt = last.time == null ? markAt : Number(last.time);
+      if (!Number.isFinite(markAt) || !Number.isFinite(lastAt) || Math.abs(Date.now()-markAt)>5000 || Math.abs(Date.now()-lastAt)>5000) throw new Error("Немає свіжих цін контракту");
+      return { at: Math.min(markAt,lastAt), mark: Number(mark.markPrice), last: Number(last.price), nextFundingAt: Number(mark.nextFundingTime) };
     }
     const raw = await this.request(exchange, "/v5/market/tickers", { category: "linear", symbol });
     const row = raw.result?.list?.find((x: any) => x.symbol === symbol);
@@ -288,7 +301,13 @@ export class MarketData {
         events.push({ at, rate, price, priceSource });
       }
     }
-    return [...new Map(events.map(e => [e.at, e])).values()].sort((a, b) => a.at - b.at);
+    const unique = new Map<number, FundingEvent>();
+    for (const event of events) {
+      const previous = unique.get(event.at);
+      if (previous && (previous.rate !== event.rate || previous.price !== event.price || previous.priceSource !== event.priceSource)) throw new Error("Суперечливі дублікати funding");
+      unique.set(event.at,event);
+    }
+    return [...unique.values()].sort((a, b) => a.at - b.at);
   }
   async getCandles(
     exchange: Exchange,

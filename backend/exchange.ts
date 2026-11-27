@@ -62,7 +62,9 @@ export class ExchangeGateway {
     if (!refresh && cached && Date.now() - cached.at < 600_000) return cached.value;
     if (!this.vault.status(exchange).configured) throw new Error("Для автоматичної комісії збережіть API-ключ із правами читання або оберіть ручний тариф");
     const c = await this.paperRead(() => this.client(exchange)), symbol = this.symbol(c, symbolId);
-    const raw = await this.paperRead<any>(() => c.fetchTradingFee(symbol)), rate = Number(raw.taker);
+    const raw = await this.paperRead<any>(() => c.fetchTradingFee(symbol));
+    const valueRaw = raw?.taker;
+    const rate = typeof valueRaw==="number" || (typeof valueRaw==="string" && valueRaw.trim()!=="") ? Number(valueRaw) : NaN;
     if (!Number.isFinite(rate) || rate < 0 || rate > 0.01) throw new Error("Біржа не повернула коректний taker-тариф");
     const value = { rate, at: Date.now(), source: "account-api" };
     this.paperCache.set(key, { at: value.at, value }); return value;
@@ -74,8 +76,9 @@ export class ExchangeGateway {
     const c = await this.paperRead(() => this.client("binance"));
     const raw = await this.paperRead<any>(() => c.fapiPrivateGetLeverageBracket({ symbol: symbolId }));
     const row = Array.isArray(raw) ? raw.find((r: any) => r.symbol === symbolId) : raw;
-    const coefficient = Number(row?.notionalCoef || 1);
-    if (!(coefficient > 0)) throw new Error("Некоректний коефіцієнт рівнів маржі");
+    if (!row || row.symbol !== symbolId || !Array.isArray(row.brackets)) throw new Error("Біржа не повернула рівні маржі вибраного контракту");
+    const coefficient = Number(row.notionalCoef ?? 1);
+    if (!Number.isFinite(coefficient) || !(coefficient > 0)) throw new Error("Некоректний коефіцієнт рівнів маржі");
     const value = validTiers((row?.brackets || []).map((r: any) => ({
       cap: Number(r.notionalCap) * coefficient, rate: Number(r.maintMarginRatio),
       deduction: Number(r.cum) * coefficient, maxLeverage: Number(r.initialLeverage),
