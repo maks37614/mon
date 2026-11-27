@@ -32,6 +32,7 @@ import "./dashboard.css";
 type VisibleSignal = Signal & {canEnter?:boolean;entryReasons?:string[];lastAutoDecision?:{at:number;reason:string;state:"skipped"|"opened"|"pending"}|null};
 type Snapshot = {
   autoBlockReason?:string|null;
+  paperCredentialReason?:string|null;
   monitorHealth?:{running:boolean;busy:boolean;startedAt:number|null;finishedAt:number|null;durationMs:number;maxDurationMs:number;cycles:number;skippedTicks:number;lastAutoAttemptAt:number|null};
   settings: Settings;
   entrySchedule: TradingScheduleState;
@@ -1142,6 +1143,7 @@ export default function App() {
                     </div>)}
                     <p className="muted">Покриття залежить від API h00k.top; це не повний прохід усіх контрактів біржі.</p>
                     {data.autoBlockReason && <p className="muted">Автовходи: {data.autoBlockReason}</p>}
+                    {data.paperCredentialReason && data.paperCredentialReason!==data.autoBlockReason && <p className="muted">Симулятор: {data.paperCredentialReason}</p>}
                     {data.monitorHealth && <p className="muted">
                       Торговий цикл: {data.monitorHealth.busy?"виконується":data.monitorHealth.running?"очікує":"зупинено"} · остання тривалість {data.monitorHealth.durationMs} мс · максимум {data.monitorHealth.maxDurationMs} мс · пропущено накладених запусків {data.monitorHealth.skippedTicks}
                       {data.monitorHealth.lastAutoAttemptAt? ` · остання спроба входу ${date(data.monitorHealth.lastAutoAttemptAt)}`:""}
