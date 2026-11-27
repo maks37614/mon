@@ -60,3 +60,25 @@ test("source disabled is distinct from a successful empty API response", async (
   assert.equal(source.coverage(settings)[0].receivedPatterns,0);
   assert.equal(source.coverage(settings)[0].lastSuccessAt,initial);
 });
+
+test("formation API Retry-After delays retries and does not restore stale data", async () => {
+  let now=initial, calls=0;
+  const source=new HookFormationSources(async()=>{
+    calls++;
+    return calls===2 ? new Response("",{status:429,headers:{"Retry-After":"90"}})
+      : Response.json({success:true,count:0,data:[]});
+  },()=>now);
+  await source.refresh(settings);
+  now+=30_000;
+  await source.refresh(settings);
+  assert.equal(source.coverage(settings)[0].nextRetryAt,now+90_000);
+  assert.equal(source.coverage(settings)[0].fresh,false);
+  assert.deepEqual(source.eligibleSignals(settings),[]);
+  now+=89_000;
+  await source.refresh(settings);
+  assert.equal(calls,2);
+  now+=1_000;
+  await source.refresh(settings);
+  assert.equal(calls,3);
+  assert.equal(source.coverage(settings)[0].fresh,true);
+});

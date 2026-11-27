@@ -243,9 +243,15 @@ export class Trading {
     const now = Date.now();
     const formations = (this.sources ? this.sources.signals(s) : this.store.get<Signal[]>("signals", []))
       .filter((signal) => formationIsVisible(signal, s, now));
+    const paperCredentialReason=s.mode==="paper" && !this.vault.status(s.exchange).configured
+      ? s.exchange==="binance" ? "Binance: потрібен API-ключ читання для рівнів маржі симулятора"
+        : s.paperFeeMode==="account" ? "Для автоматичної комісії потрібен API-ключ читання або ручний тариф" : null
+      : null;
     const autoBlockReason=this.entryPauseRequested || !s.autoEntries?"Автоматичні входи вимкнено або запитано паузу"
       :!tradingScheduleState(s.tradingSchedule,now).allowed?"Поза торговим розкладом"
       :s.mode==="live" && (!this.liveAllowed || !this.vault.status(s.exchange).verified)?"Реальний режим або API не дозволено"
+      :paperCredentialReason?paperCredentialReason
+      :this.sources && !s.hookRegularFormations?"Звичайні формації вимкнено; ранні не відкривають позиції"
       :b.pending.length?"Очікування узгодження ордерів"
       :b.positions.some(p=>p.status!=="active")?"Позиції потребують узгодження"
       :!this.protectionReady(b,s.mode)?"Захист відкритої позиції потребує перевірки"
@@ -256,6 +262,7 @@ export class Trading {
     return {
       settings: s,
       autoBlockReason,
+      paperCredentialReason,
       monitorHealth:{running:this.running,busy:this.monitoring,startedAt:this.monitorStartedAt||null,
         finishedAt:this.monitorFinishedAt||null,durationMs:this.monitorDurationMs,maxDurationMs:this.monitorMaxDurationMs,
         cycles:this.monitorCycles,skippedTicks:this.monitorSkipped,lastAutoAttemptAt:this.lastAutoAttemptAt||null},
@@ -297,6 +304,7 @@ export class Trading {
         if(!this.paperMonitoringReady(b,s.mode)) reasons.push("Очікування актуальних цін відкритих позицій");
         if(now-(b.lastEntries[signal.symbol]||0)<s.entryCooldownSeconds*1000) reasons.push("Пауза повторного входу");
         if(s.mode==="live" && (!this.liveAllowed || !this.vault.status(s.exchange).verified)) reasons.push("Реальний режим або API не дозволено");
+        if(paperCredentialReason) reasons.push(paperCredentialReason);
         const last=this.autoDecisions.get(signal.id);
         return {...signal,canEnter:!reasons.length,entryReasons:reasons,
           lastAutoDecision:last && now-last.at<15*60_000?last:null};
