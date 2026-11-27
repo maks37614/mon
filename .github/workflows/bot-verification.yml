@@ -22,6 +22,7 @@ jobs:
         with:
           node-version: "24.22.1"
           cache: npm
+      - run: bash -n deploy/update-krystian.sh
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
